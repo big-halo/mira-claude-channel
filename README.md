@@ -1,26 +1,26 @@
-# Always Listening — Claude Code channel
+# Mira — Claude Code channel
 
-A Claude Code channel plugin that bridges chat from the Always Listening G1 iOS app into a local Claude Code session.
+A Claude Code channel plugin that bridges chat from the Mira iOS app into a local Claude Code session.
 
-When the iOS app's "Claude Code" toggle is ON, every message the user sends from the app POSTs to `http://127.0.0.1:3141/api/chat` on your laptop. This plugin runs as an MCP channel inside Claude Code, receives the POST, pushes the message into the active Claude Code session as a `<channel source="alwayslistening" chat_id="...">` tag, and waits. When Claude calls the `reply` tool, the response is delivered back to the iOS app.
+When the iOS app's "Claude Code" toggle is ON, every message the user sends from the app POSTs to `http://127.0.0.1:3141/api/chat` on your laptop. This plugin runs as an MCP channel inside Claude Code, receives the POST, pushes the message into the active Claude Code session as a `<channel source="mira" chat_id="...">` tag, and waits. When Claude calls the `reply` tool, the response is delivered back to the iOS app.
 
 ## Install
 
 This is a development-stage channel, so it isn't on Anthropic's approved allowlist. You'll start Claude Code with `--dangerously-load-development-channels` to load it.
 
-1. Add this directory as a local marketplace, then install the plugin:
+1. Add the marketplace, then install the plugin:
 
    ```sh
    claude
    # inside the Claude Code session:
-   /plugin marketplace add /Users/caineardayfio/alwayslistening-claude-channel
-   /plugin install alwayslistening@alwayslistening-marketplace
+   /plugin marketplace add big-halo/mira-claude-channel
+   /plugin install mira@mira-marketplace
    ```
 
 2. Quit, then relaunch Claude Code with the development-channels flag:
 
    ```sh
-   claude --dangerously-load-development-channels plugin:alwayslistening@alwayslistening-marketplace
+   claude --dangerously-load-development-channels plugin:mira@mira-marketplace
    ```
 
    Confirm the prompt. Claude Code will spawn `server.ts` over stdio and the HTTP listener will start on `127.0.0.1:3141` automatically. You don't run `bun` yourself.
@@ -45,7 +45,7 @@ The request blocks until Claude calls `reply` (timeout 120s). The response body 
 
 ```
 .claude-plugin/marketplace.json          # marketplace catalog
-plugins/alwayslistening/
+plugins/mira/
   .claude-plugin/plugin.json             # plugin manifest, declares mcpServers
   server.ts                              # MCP channel + Bun HTTP listener
   package.json                           # @modelcontextprotocol/sdk
