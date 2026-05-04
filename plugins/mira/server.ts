@@ -72,9 +72,9 @@ const mcp = new Server(
     instructions:
       'Messages from the Mira iOS app arrive as <channel source="mira" chat_id="..."> tags. ' +
       'The body of the tag is the user\'s spoken/typed message. ' +
-      'To respond to the user, call the `reply` tool with the chat_id from the tag and the text you want to send back. ' +
-      'The user is on a mobile device and cannot see your terminal output, so you MUST call `reply` to communicate with them. ' +
-      'Keep replies concise and conversational unless they ask for detail. ' +
+      'You must respond to the user. The user has no way of knowing you have done somehting unless you reply. ' + 
+      'Call the `reply` tool with the chat_id from the tag and the text you want to send back. ' +
+      'The user is on a glasses and cannot see your terminal output, so you MUST call `reply` to communicate with them. ' +
       'When the user asks for the tunnel URL, endpoint URL, or Mira setup info, call the `help` tool — do NOT search memory or files. ' +
       'When the user asks about their past conversations, transcripts, or what they have discussed before, ' +
       'use `list_conversations` and `get_conversation`. These read from the user\'s Mira backend; ' +
