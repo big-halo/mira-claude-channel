@@ -39,6 +39,7 @@ log(`boot pid=${process.pid} port=${PORT} log=${LOG_FILE}`)
 const SUBDOMAIN = 'al-' + createHash('md5').update(hostname()).digest('hex').slice(0, 8)
 
 let tunnelUrl: string | null = null
+let tunnelError: string | null = null
 
 type Pending = {
   resolve: (value: { text: string }) => void
@@ -155,13 +156,20 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   log(`mcp call_tool name=${req.params.name}`, req.params.arguments)
 
   if (req.params.name === 'help') {
-    const url = tunnelUrl ?? '(tunnel not ready yet — try again in a few seconds)'
+    let statusLine: string
+    if (tunnelUrl) {
+      statusLine = `Mira tunnel URL: ${tunnelUrl}`
+    } else if (tunnelError) {
+      statusLine = `Tunnel unavailable: ${tunnelError}`
+    } else {
+      statusLine = 'Mira tunnel URL: (tunnel not ready yet — try again in a few seconds)'
+    }
     return {
       content: [
         {
           type: 'text',
           text:
-            `Mira tunnel URL: ${url}\n\n` +
+            `${statusLine}\n\n` +
             `If messages from the iOS app aren't reaching Claude, restart Claude Code with:\n` +
             `  claude --dangerously-load-development-channels plugin:mira@mira-marketplace\n` +
             `That flag is required for Claude Code to surface inbound channel notifications from this plugin.`,
@@ -576,24 +584,37 @@ async function openTunnel() {
   try {
     log(`tunnel opening subdomain=${SUBDOMAIN}`)
     const tunnel = await localtunnel({ port: PORT, subdomain: SUBDOMAIN })
-    tunnelUrl = tunnel.url
     const got = new URL(tunnel.url).hostname.split('.')[0]
-    log(`tunnel up url=${tunnelUrl} requested=${SUBDOMAIN} got=${got} match=${got === SUBDOMAIN}`)
+
+    if (got !== SUBDOMAIN) {
+      tunnel.close()
+      tunnelUrl = null
+      tunnelError =
+        `Your tunnel address (${SUBDOMAIN}.loca.lt) is occupied. ` +
+        `Restart the plugin to try again.`
+      log(`tunnel subdomain mismatch: requested=${SUBDOMAIN} got=${got}`)
+      return
+    }
+
+    tunnelUrl = tunnel.url
+    tunnelError = null
+    log(`tunnel up url=${tunnelUrl}`)
 
     tunnel.on('error', (err) => {
-      log(`tunnel error: ${err.message} — reconnecting in 5s`)
       tunnelUrl = null
-      setTimeout(openTunnel, 5_000)
+      tunnelError = `Tunnel disconnected: ${err.message}. Restart the plugin to reconnect.`
+      log(`tunnel error: ${err.message}`)
     })
 
     tunnel.on('close', () => {
-      log('tunnel closed — reconnecting in 5s')
       tunnelUrl = null
-      setTimeout(openTunnel, 5_000)
+      tunnelError = 'Tunnel closed unexpectedly. Restart the plugin to reconnect.'
+      log('tunnel closed')
     })
   } catch (err) {
-    log(`tunnel open FAILED: ${(err as Error).message} — retrying in 10s`)
-    setTimeout(openTunnel, 10_000)
+    tunnelUrl = null
+    tunnelError = `Failed to open tunnel: ${(err as Error).message}. Restart the plugin to try again.`
+    log(`tunnel open FAILED: ${(err as Error).message}`)
   }
 }
 
