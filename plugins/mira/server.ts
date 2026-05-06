@@ -4,6 +4,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { appendFileSync } from 'fs'
+import { openTunnel, getTunnelUrl, getTunnelError } from './cloudflare'
 
 const PORT = Number(process.env.MIRA_PORT ?? 3141)
 const REQUEST_TIMEOUT_MS = 120_000
@@ -31,13 +32,6 @@ function safeStringify(value: unknown): string {
 }
 
 log(`boot pid=${process.pid} port=${PORT} log=${LOG_FILE}`)
-
-// Derive a stable subdomain from the machine hostname so the URL is consistent
-// across restarts (best-effort — localtunnel falls back to random if taken).
-const SUBDOMAIN = 'al-' + createHash('md5').update(hostname()).digest('hex').slice(0, 8)
-
-let tunnelUrl: string | null = null
-let tunnelError: string | null = null
 
 type Pending = {
   controller: ReadableStreamDefaultController<Uint8Array>
@@ -189,6 +183,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   log(`mcp call_tool name=${req.params.name}`, req.params.arguments)
 
   if (req.params.name === 'help') {
+    const tunnelUrl = getTunnelUrl()
+    const tunnelError = getTunnelError()
     let statusLine: string
     if (tunnelUrl) {
       statusLine = `Mira tunnel URL: ${tunnelUrl}`
@@ -267,17 +263,6 @@ const PermissionRequestSchema = z.object({
   }),
 })
 
-const ACTION_PHRASES: Record<string, string> = {
-  Bash: 'Run a shell command',
-  Write: 'Write a file',
-  Edit: 'Edit a file',
-  Read: 'Read a file',
-  WebFetch: 'Fetch a URL',
-  WebSearch: 'Search the web',
-  Glob: 'Search for files',
-  Grep: 'Search file contents',
-}
-
 mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
   const { request_id, tool_name, input_preview } = params
   log(`permission_request request_id=${request_id} tool=${tool_name}`)
@@ -287,6 +272,7 @@ mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
   }
   const p = pending.get(lastActiveChatId)
   if (!p) {
+    log(`permission_request DROPPED no-stream chat_id=${lastActiveChatId}`)
     pendingPermissions.add(request_id)
     return
   }
@@ -297,16 +283,21 @@ mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
   }
   pendingPermissions.add(request_id)
 
-  const action = ACTION_PHRASES[tool_name] ?? `Use ${tool_name}`
-  const parsed = JSON.parse(input_preview) as Record<string, unknown>
-  const details = Object.entries(parsed).map(([label, value]) => ({
-    label,
-    value: typeof value === 'string' ? value : JSON.stringify(value),
-  }))
+  const truncate = (s: string) => s.length > 500 ? s.slice(0, 500) + '…' : s
+  let details: { value: string }[]
+  try {
+    const parsed = JSON.parse(input_preview) as Record<string, unknown>
+    details = Object.values(parsed).map(value => ({
+      value: truncate(typeof value === 'string' ? value : JSON.stringify(value)),
+    }))
+  } catch {
+    details = [{ value: truncate(input_preview) }]
+  }
 
   sseSend(p.controller, {
-    permission_request: { request_id, tool_name, action, details },
+    permission_request: { request_id, tool_name, details },
   })
+  log(`permission_request SENT chat_id=${lastActiveChatId} request_id=${request_id} details_count=${details.length}`)
 })
 
 // MARK: - Backend transcript helpers
@@ -702,42 +693,4 @@ Bun.serve({
 
 log(`http listener up on http://127.0.0.1:${PORT}`)
 
-async function openTunnel() {
-  try {
-    log(`tunnel opening subdomain=${SUBDOMAIN}`)
-    const tunnel = await localtunnel({ port: PORT, subdomain: SUBDOMAIN })
-    const got = new URL(tunnel.url).hostname.split('.')[0]
-
-    if (got !== SUBDOMAIN) {
-      tunnel.close()
-      tunnelUrl = null
-      tunnelError =
-        `Your tunnel address (${SUBDOMAIN}.loca.lt) is occupied. ` +
-        `Restart the plugin to try again.`
-      log(`tunnel subdomain mismatch: requested=${SUBDOMAIN} got=${got}`)
-      return
-    }
-
-    tunnelUrl = tunnel.url
-    tunnelError = null
-    log(`tunnel up url=${tunnelUrl}`)
-
-    tunnel.on('error', (err) => {
-      tunnelUrl = null
-      tunnelError = `Tunnel disconnected: ${err.message}. Restart the plugin to reconnect.`
-      log(`tunnel error: ${err.message}`)
-    })
-
-    tunnel.on('close', () => {
-      tunnelUrl = null
-      tunnelError = 'Tunnel closed unexpectedly. Restart the plugin to reconnect.'
-      log('tunnel closed')
-    })
-  } catch (err) {
-    tunnelUrl = null
-    tunnelError = `Failed to open tunnel: ${(err as Error).message}. Restart the plugin to try again.`
-    log(`tunnel open FAILED: ${(err as Error).message}`)
-  }
-}
-
-openTunnel()
+openTunnel(PORT, log)
