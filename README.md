@@ -2,7 +2,7 @@
 
 A Claude Code channel plugin that bridges chat from the Mira iOS app into a local Claude Code session.
 
-When the iOS app's "Claude Code" toggle is ON, every message the user sends from the app POSTs to `http://127.0.0.1:3141/api/chat` on your laptop. This plugin runs as an MCP channel inside Claude Code, receives the POST, pushes the message into the active Claude Code session as a `<channel source="mira" chat_id="...">` tag, and waits. When Claude calls the `reply` tool, the response is delivered back to the iOS app.
+When the iOS app's "Claude Code" toggle is ON, every message the user sends from the app POSTs to `http://127.0.0.1:3141/api/chat` on your laptop. This plugin runs as an MCP channel inside Claude Code, receives the POST, pushes the message into the active Claude Code session as a `<channel source="mira" chat_id="...">` tag, and waits. When Claude finishes responding, the plugin's `Stop` hook forwards `last_assistant_message` back to the waiting iOS request.
 
 ## Install
 
@@ -27,7 +27,7 @@ This is a development-stage channel, so it isn't on Anthropic's approved allowli
 
 3. In the iOS app, open Settings → Claude Code → toggle **Local Integration** ON.
 
-4. Send a message from the app. It will appear in your Claude Code session as a `<channel>` tag. Claude responds by calling the `reply` tool, and the text shows up back in the app.
+4. Send a message from the app. It will appear in your Claude Code session as a `<channel>` tag. Claude responds normally, and the `Stop` hook sends the final assistant message back to the app.
 
 ## Test from curl (no iOS app needed)
 
@@ -39,7 +39,7 @@ curl -X POST http://127.0.0.1:3141/api/chat \
   -d '{"messages":[{"speaker":0,"content":"hello from curl"}],"user_local_time":"now","user_timezone":"UTC","location":null}'
 ```
 
-The request blocks until Claude calls `reply` (timeout 120s). The response body is `{"text": "...", "sources": [], "debug": null}`, matching the format the iOS app expects.
+The request opens an SSE response until Claude's `Stop` hook forwards the final assistant message (timeout 120s). The stream emits `{"text": "..."}`, `{"sources": []}`, then `[DONE]`, matching the format the iOS app expects.
 
 ## Structure
 

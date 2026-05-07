@@ -91,9 +91,24 @@ async function syncConversationsToMarkdown() {
 log(`boot pid=${process.pid} port=${PORT} log=${LOG_FILE}`)
 
 type Pending = {
-  controller: ReadableStreamDefaultController<Uint8Array>
+  resolve: (response: ChatResponse) => void
+  reject: (error: ChatClosedError) => void
   timer: ReturnType<typeof setTimeout>
-  keepalive: ReturnType<typeof setInterval>
+}
+
+type ChatCloseReason = 'timeout' | 'superseded'
+
+type ChatResponse = {
+  text: string
+  sources: unknown[]
+  debug: null
+}
+
+class ChatClosedError extends Error {
+  constructor(readonly reason: ChatCloseReason) {
+    super(reason)
+    this.name = 'ChatClosedError'
+  }
 }
 
 let active: Pending | null = null
@@ -112,22 +127,12 @@ async function denyAllPendingPermissions() {
   pendingPermissions.clear()
 }
 
-function sseSend(controller: ReadableStreamDefaultController<Uint8Array>, payload: unknown) {
-  controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`))
-}
-
-function closeActive(reason: 'timeout' | 'superseded') {
+function closeActive(reason: ChatCloseReason) {
   const p = active
   if (!p) return
   active = null
   clearTimeout(p.timer)
-  clearInterval(p.keepalive)
-  try {
-    sseSend(p.controller, { error: reason })
-    p.controller.close()
-  } catch {
-    // controller may already be closed
-  }
+  p.reject(new ChatClosedError(reason))
 }
 
 function resetTimeout() {
@@ -138,6 +143,51 @@ function resetTimeout() {
     log(`chat TIMEOUT after ${REQUEST_TIMEOUT_MS}ms`)
     closeActive('timeout')
   }, REQUEST_TIMEOUT_MS)
+}
+
+function sseSend(controller: ReadableStreamDefaultController<Uint8Array>, payload: unknown) {
+  controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`))
+}
+
+function openPendingChat(): { entry: Pending; response: Promise<ChatResponse> } {
+  let entry!: Pending
+  const response = new Promise<ChatResponse>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (active === entry) {
+        log(`chat TIMEOUT after ${REQUEST_TIMEOUT_MS}ms`)
+        closeActive('timeout')
+      }
+    }, REQUEST_TIMEOUT_MS)
+    entry = { resolve, reject, timer }
+    active = entry
+  })
+  response.catch(() => undefined)
+  return { entry, response }
+}
+
+function responseToSse(response: Promise<ChatResponse>) {
+  return new ReadableStream({
+    async start(controller) {
+      try {
+        const payload = await response
+        sseSend(controller, { text: payload.text })
+        sseSend(controller, { sources: payload.sources })
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'))
+      } catch (err) {
+        const message = err instanceof ChatClosedError ? err.reason : 'failed'
+        sseSend(controller, { error: message })
+      } finally {
+        controller.close()
+      }
+    },
+  })
+}
+
+function cancelPendingChat(entry: Pending) {
+  if (active !== entry) return
+  active = null
+  clearTimeout(entry.timer)
+  entry.resolve({ text: '', sources: [], debug: null })
 }
 
 type Connection = {
@@ -158,10 +208,8 @@ const mcp = new Server(
     instructions:
       'Messages from the Mira iOS app arrive as <channel source="mira"> tags. ' +
       'The body of the tag is the user\'s spoken/typed message. ' +
-      'You MUST ALWAYS call the `reply` tool exactly once before finishing your turn. This is non-negotiable. ' +
-      'This applies to EVERY response. ANY response at all. ' +
-      'If a tool fails or you need clarification, call `reply` with that question or explanation—do NOT just respond in the terminal. ' +
-      'The user is on glasses and cannot see your terminal output, so calling `reply` is the ONLY way to communicate with them. ' +
+      'Respond normally in your final assistant message; Mira sends that message to the glasses automatically when the turn stops. ' +
+      'The user is on glasses and cannot see your terminal output, so put user-facing text in your final assistant message. ' +
       'When the user asks for the tunnel URL, endpoint URL, or Mira setup info, call the `help` tool — do NOT search memory or files. ' +
       'When asked about past Mira conversations, search the local transcript cache at ~/.mira/*/*.md with filesystem search first, then read only the relevant matching session files.',
   },
@@ -170,26 +218,14 @@ const mcp = new Server(
 mcp.setRequestHandler(ListToolsRequestSchema, async () => {
   log('mcp list_tools')
   return {
-  tools: [
-    {
-      name: 'reply',
-      description:
-        'Communicate with a user. Send them a message to their glasses. Routes to the active chat automatically.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          text: { type: 'string', description: 'The reply to send to the user' },
-        },
-        required: ['text'],
+    tools: [
+      {
+        name: 'help',
+        description:
+          'Returns the public tunnel URL for the Mira iOS app, plus setup help. Call this when the user asks for their endpoint URL, asks how to set this up, or says messages from the app aren\'t reaching Claude.',
+        inputSchema: { type: 'object', properties: {} },
       },
-    },
-    {
-      name: 'help',
-      description:
-        'Returns the public tunnel URL for the Mira iOS app, plus setup help. Call this when the user asks for their endpoint URL, asks how to set this up, or says messages from the app aren\'t reaching Claude.',
-      inputSchema: { type: 'object', properties: {} },
-    },
-  ],
+    ],
   }
 })
 
@@ -226,35 +262,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     }
   }
 
-  if (req.params.name !== 'reply') {
-    log(`mcp call_tool unknown tool=${req.params.name}`)
-    throw new Error(`unknown tool: ${req.params.name}`)
-  }
-  const { text } = req.params.arguments as { text: string }
-  const p = active
-  if (!p) {
-    log('reply NO-MATCH no-active')
-    return {
-      content: [
-        { type: 'text', text: `No active chat to reply to (it may have timed out).` },
-      ],
-      isError: true,
-    }
-  }
-  active = null
-  clearTimeout(p.timer)
-  clearInterval(p.keepalive)
-  log(`reply OK text_len=${text?.length ?? 0}`)
-  // Dismiss any still-pending permissions—they were resolved elsewhere (e.g., terminal)
-  if (pendingPermissions.size > 0) {
-    sseSend(p.controller, { permission_dismiss: { request_ids: [...pendingPermissions] } })
-    pendingPermissions.clear()
-  }
-  sseSend(p.controller, { text })
-  sseSend(p.controller, { sources: [] })
-  p.controller.enqueue(encoder.encode('data: [DONE]\n\n'))
-  p.controller.close()
-  return { content: [{ type: 'text', text: 'sent' }] }
+  log(`mcp call_tool unknown tool=${req.params.name}`)
+  throw new Error(`unknown tool: ${req.params.name}`)
 })
 
 // Permission relay: Claude Code asks user for approval
@@ -269,7 +278,7 @@ const PermissionRequestSchema = z.object({
 })
 
 mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
-  const { request_id, tool_name, input_preview } = params
+  const { request_id, tool_name } = params
   log(`permission_request request_id=${request_id} tool=${tool_name}`)
   const p = active
   if (!p) {
@@ -277,27 +286,8 @@ mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
     return
   }
   resetTimeout()
-  if (pendingPermissions.size > 0) {
-    sseSend(p.controller, { permission_dismiss: { request_ids: [...pendingPermissions] } })
-    pendingPermissions.clear()
-  }
   pendingPermissions.add(request_id)
-
-  const truncate = (s: string) => s.length > 500 ? s.slice(0, 500) + '…' : s
-  let details: { value: string }[]
-  try {
-    const parsed = JSON.parse(input_preview) as Record<string, unknown>
-    details = Object.values(parsed).map(value => ({
-      value: truncate(typeof value === 'string' ? value : JSON.stringify(value)),
-    }))
-  } catch {
-    details = [{ value: truncate(input_preview) }]
-  }
-
-  sseSend(p.controller, {
-    permission_request: { request_id, tool_name, details },
-  })
-  log(`permission_request SENT request_id=${request_id} details_count=${details.length}`)
+  log(`permission_request QUEUED request_id=${request_id}`)
 })
 
 // MARK: - Backend transcript helpers
@@ -444,10 +434,42 @@ Bun.serve({
       return Response.json({ status: 'cancelled' })
     }
 
+    if (req.method === 'POST' && url.pathname === '/api/stop') {
+      let body: any
+      try {
+        body = await req.json()
+      } catch {
+        log('http /api/stop invalid json')
+        return Response.json({ status: 'ignored', reason: 'invalid_json' })
+      }
+
+      const text = (body?.last_assistant_message ?? '').toString()
+      if (!text.trim()) {
+        log('http /api/stop empty last_assistant_message')
+        return Response.json({ status: 'ignored', reason: 'empty_message' })
+      }
+
+      const p = active
+      if (!p) {
+        log(`stop NO-MATCH no-active session=${body?.session_id ?? '(unknown)'}`)
+        return Response.json({ status: 'ignored', reason: 'no_active_chat' })
+      }
+
+      active = null
+      clearTimeout(p.timer)
+      if (pendingPermissions.size > 0) {
+        log(`clearing ${pendingPermissions.size} stale permissions on stop`)
+        pendingPermissions.clear()
+      }
+      log(`stop OK text_len=${text.length}`)
+      p.resolve({ text, sources: [], debug: null })
+      return Response.json({ status: 'delivered' })
+    }
+
     if (req.method === 'POST' && url.pathname === '/api/chat') {
       // Clear any stale permissions before processing a new chat
       await denyAllPendingPermissions()
-      // A new chat supersedes any in-flight one (the model can only reply to one at a time)
+      // A new chat supersedes any in-flight one (the model can only answer one at a time)
       closeActive('superseded')
       let body: any
       try {
@@ -472,40 +494,23 @@ Bun.serve({
 
       log(`chat IN text=${JSON.stringify(userText.slice(0, 200))}`)
 
-      let entry: Pending | null = null
-      const stream = new ReadableStream({
-        start(controller) {
-          const timer = setTimeout(() => {
-            if (active === entry) {
-              log(`chat TIMEOUT after ${REQUEST_TIMEOUT_MS}ms`)
-              closeActive('timeout')
-            }
-          }, REQUEST_TIMEOUT_MS)
-          const keepalive = setInterval(() => {
-            controller.enqueue(encoder.encode(': keepalive\n\n'))
-          }, 20_000)
-          entry = { controller, timer, keepalive }
-          active = entry
-        },
-        cancel() {
-          if (active === entry && entry) {
-            clearTimeout(entry.timer)
-            clearInterval(entry.keepalive)
-            active = null
-          }
-        },
-      })
-
+      const { entry, response } = openPendingChat()
       log('mcp notify → notifications/claude/channel')
-      await mcp.notification({
-        method: 'notifications/claude/channel',
-        params: { content: userText, meta },
-      })
-      log('mcp notify ✓')
+      try {
+        await mcp.notification({
+          method: 'notifications/claude/channel',
+          params: { content: userText, meta },
+        })
+        log('mcp notify ✓')
 
-      return new Response(stream, {
-        headers: { 'Content-Type': 'text/event-stream' },
-      })
+        return new Response(responseToSse(response), {
+          headers: { 'Content-Type': 'text/event-stream' },
+        })
+      } catch (err) {
+        cancelPendingChat(entry)
+        log(`chat failed err=${(err as Error).message}`)
+        return Response.json({ error: { message: 'failed to send message to Claude' } }, { status: 500 })
+      }
     }
 
     return new Response('not found', { status: 404 })
