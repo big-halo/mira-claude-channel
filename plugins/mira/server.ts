@@ -4,12 +4,14 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { appendFileSync, mkdirSync, writeFileSync, existsSync } from 'fs'
-import { openTunnel, getTunnelUrl, getTunnelError, getTunnelMode, isTunnelRunning } from './cloudflare'
+import { openProvisionedTunnel, getTunnelUrl, getTunnelError } from './cloudflare'
+import { getOrCreateDevice } from './device'
 import { join } from 'path'
 import { homedir } from 'os'
 
 const PORT = Number(process.env.MIRA_PORT ?? 3141)
 const REQUEST_TIMEOUT_MS = 120_000
+const TUNNEL_BACKEND_URL = 'http://localhost:8000'
 
 const LOG_FILE = process.env.MIRA_LOG ?? '/tmp/mira.log'
 function log(msg: string, extra?: unknown) {
@@ -94,6 +96,7 @@ type Pending = {
   resolve: (response: ChatResponse) => void
   reject: (error: ChatClosedError) => void
   timer: ReturnType<typeof setTimeout>
+  controller: ReadableStreamDefaultController<Uint8Array> | null
 }
 
 type ChatCloseReason = 'timeout' | 'superseded'
@@ -112,20 +115,7 @@ class ChatClosedError extends Error {
 }
 
 let active: Pending | null = null
-const pendingPermissions = new Set<string>()
 const encoder = new TextEncoder()
-
-async function denyAllPendingPermissions() {
-  if (pendingPermissions.size === 0) return
-  log(`denying ${pendingPermissions.size} stale permissions`)
-  for (const id of pendingPermissions) {
-    await mcp.notification({
-      method: 'notifications/claude/channel/permission',
-      params: { request_id: id, behavior: 'deny' },
-    })
-  }
-  pendingPermissions.clear()
-}
 
 function closeActive(reason: ChatCloseReason) {
   const p = active
@@ -145,8 +135,16 @@ function resetTimeout() {
   }, REQUEST_TIMEOUT_MS)
 }
 
-function sseSend(controller: ReadableStreamDefaultController<Uint8Array>, payload: unknown) {
-  controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`))
+function sseSend(p: Pending, payload: unknown) {
+  if (!p.controller) {
+    log(`sseSend DROPPED no controller payload=${safeStringify(payload).slice(0, 120)}`)
+    return
+  }
+  try {
+    p.controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`))
+  } catch {
+    p.controller = null
+  }
 }
 
 function openPendingChat(): { entry: Pending; response: Promise<ChatResponse> } {
@@ -158,27 +156,32 @@ function openPendingChat(): { entry: Pending; response: Promise<ChatResponse> } 
         closeActive('timeout')
       }
     }, REQUEST_TIMEOUT_MS)
-    entry = { resolve, reject, timer }
+    entry = { resolve, reject, timer, controller: null }
     active = entry
   })
   response.catch(() => undefined)
   return { entry, response }
 }
 
-function responseToSse(response: Promise<ChatResponse>) {
+function responseToSse(p: Pending, response: Promise<ChatResponse>) {
   return new ReadableStream({
     async start(controller) {
+      p.controller = controller
       try {
         const payload = await response
-        sseSend(controller, { text: payload.text })
-        sseSend(controller, { sources: payload.sources })
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text: payload.text })}\n\n`))
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ sources: payload.sources })}\n\n`))
         controller.enqueue(encoder.encode('data: [DONE]\n\n'))
       } catch (err) {
         const message = err instanceof ChatClosedError ? err.reason : 'failed'
-        sseSend(controller, { error: message })
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: message })}\n\n`))
       } finally {
+        p.controller = null
         controller.close()
       }
+    },
+    cancel() {
+      p.controller = null
     },
   })
 }
@@ -235,13 +238,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   if (req.params.name === 'help') {
     const tunnelUrl = getTunnelUrl()
     const tunnelError = getTunnelError()
-    const tunnelMode = getTunnelMode()
     let statusLine: string
     if (tunnelUrl) {
       statusLine = `Mira tunnel URL: ${tunnelUrl}`
-    } else if (tunnelMode === 'named' && isTunnelRunning()) {
-      statusLine =
-        'Mira named Cloudflare tunnel is running, but no public URL is configured in MIRA_TUNNEL_URL.'
     } else if (tunnelError) {
       statusLine = `Tunnel unavailable: ${tunnelError}`
     } else {
@@ -253,7 +252,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           type: 'text',
           text:
             `${statusLine}\n\n` +
-            `To use a named Cloudflare tunnel, set MIRA_CLOUDFLARED_TOKEN and MIRA_TUNNEL_URL before starting Claude Code.\n\n` +
+            `Setup:\n` +
+            `  1. Open the Mira iOS app → Settings → Endpoint URL\n` +
+            `  2. Paste the URL above\n` +
+            `  3. Send a message — it should arrive here as a channel notification\n\n` +
             `If messages from the iOS app aren't reaching Claude, restart Claude Code with:\n` +
             `  claude --dangerously-load-development-channels plugin:mira@mira-marketplace\n` +
             `That flag is required for Claude Code to surface inbound channel notifications from this plugin.`,
@@ -278,16 +280,24 @@ const PermissionRequestSchema = z.object({
 })
 
 mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
-  const { request_id, tool_name } = params
+  const { request_id, tool_name, description, input_preview } = params
   log(`permission_request request_id=${request_id} tool=${tool_name}`)
   const p = active
   if (!p) {
-    pendingPermissions.add(request_id)
+    log(`permission_request DROPPED no active chat (local terminal will handle)`)
     return
   }
   resetTimeout()
-  pendingPermissions.add(request_id)
-  log(`permission_request QUEUED request_id=${request_id}`)
+  sseSend(p, {
+    permission_request: {
+      request_id,
+      tool_name,
+      details: [
+        { label: 'description', value: description },
+        { label: 'input_preview', value: input_preview },
+      ],
+    },
+  })
 })
 
 // MARK: - Backend transcript helpers
@@ -329,6 +339,18 @@ async function backendGet(path: string): Promise<Response> {
 
 await mcp.connect(new StdioServerTransport())
 log('mcp stdio connected')
+
+// Exit when Claude Code (our parent) goes away, so the HTTP port releases
+// and the next launch can bind. Without this, Bun.serve() keeps the loop
+// alive forever after stdio closes.
+const shutdown = (reason: string) => {
+  log(`shutdown reason=${reason}`)
+  process.exit(0)
+}
+process.stdin.on('end', () => shutdown('stdin end'))
+process.stdin.on('close', () => shutdown('stdin close'))
+process.on('SIGTERM', () => shutdown('SIGTERM'))
+process.on('SIGINT', () => shutdown('SIGINT'))
 
 Bun.serve({
   port: PORT,
@@ -416,22 +438,13 @@ Bun.serve({
         return Response.json({ error: 'missing request_id or response' }, { status: 400 })
       }
       log(`permission_response request_id=${request_id} response=${response}`)
-      pendingPermissions.delete(request_id)
       resetTimeout()
-      const behavior =
-        response === 'allow' ? 'allow' :
-        response === 'allow_permanent' ? 'allow_always' :
-        'deny'
+      const behavior = response === 'allow' ? 'allow' : 'deny'
       await mcp.notification({
         method: 'notifications/claude/channel/permission',
         params: { request_id, behavior },
       })
       return Response.json({ status: 'recorded' })
-    }
-
-    if (req.method === 'POST' && url.pathname === '/api/cancel-permissions') {
-      await denyAllPendingPermissions()
-      return Response.json({ status: 'cancelled' })
     }
 
     if (req.method === 'POST' && url.pathname === '/api/stop') {
@@ -457,18 +470,12 @@ Bun.serve({
 
       active = null
       clearTimeout(p.timer)
-      if (pendingPermissions.size > 0) {
-        log(`clearing ${pendingPermissions.size} stale permissions on stop`)
-        pendingPermissions.clear()
-      }
       log(`stop OK text_len=${text.length}`)
       p.resolve({ text, sources: [], debug: null })
       return Response.json({ status: 'delivered' })
     }
 
     if (req.method === 'POST' && url.pathname === '/api/chat') {
-      // Clear any stale permissions before processing a new chat
-      await denyAllPendingPermissions()
       // A new chat supersedes any in-flight one (the model can only answer one at a time)
       closeActive('superseded')
       let body: any
@@ -503,7 +510,7 @@ Bun.serve({
         })
         log('mcp notify ✓')
 
-        return new Response(responseToSse(response), {
+        return new Response(responseToSse(entry, response), {
           headers: { 'Content-Type': 'text/event-stream' },
         })
       } catch (err) {
@@ -519,4 +526,12 @@ Bun.serve({
 
 log(`http listener up on http://127.0.0.1:${PORT}`)
 
-openTunnel(PORT, log)
+// Provision the persistent Cloudflare tunnel on boot.
+const device = getOrCreateDevice()
+log(`device id=${device.device_id} label=${device.device_label}`)
+void openProvisionedTunnel({
+  deviceId: device.device_id,
+  deviceLabel: device.device_label,
+  backendBaseUrl: TUNNEL_BACKEND_URL,
+  log,
+}).catch((err) => log(`tunnel open failed: ${(err as Error).message}`))
