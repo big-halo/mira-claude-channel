@@ -35,6 +35,36 @@ function safeStringify(value: unknown): string {
   }
 }
 
+function basename(p: string): string {
+  const i = p.lastIndexOf('/')
+  return i >= 0 ? p.slice(i + 1) : p
+}
+
+// Generic "Tool: <hint>" formatter. We don't hardcode per-tool rules; instead
+// we pick the first non-empty string field from a small set of conventional
+// "intent" keys (the field most tool inputs use to describe what they're doing).
+// Works for built-ins (Bash.command, Read.file_path, WebSearch.query, …) and
+// any MCP tool that follows the same convention.
+const TOOL_INTENT_KEYS = [
+  'command', 'query', 'pattern', 'url', 'prompt',
+  'description', 'file_path', 'path', 'text', 'name',
+]
+
+function renderToolDisplay(toolName: string, input: unknown): string {
+  // mcp__server__tool → tool; snake_case → spaces.
+  const pretty = toolName.replace(/^mcp__[^_]+__/, '').replace(/_/g, ' ') || 'tool'
+  const fields = (input ?? {}) as Record<string, unknown>
+  const trunc = (s: string, n = 50) => (s.length > n ? s.slice(0, n - 1) + '…' : s)
+  for (const key of TOOL_INTENT_KEYS) {
+    const v = fields[key]
+    if (typeof v === 'string' && v.trim()) {
+      const hint = key === 'file_path' || key === 'path' ? basename(v) : v
+      return `${pretty}: ${trunc(hint)}`
+    }
+  }
+  return `${pretty}…`
+}
+
 function sessionMarkdownPath(userDir: string, session: BackendSession): string {
   const title =
     (session.title?.trim() || 'untitled')
@@ -214,7 +244,7 @@ const mcp = new Server(
       'Respond normally in your final assistant message; Mira sends that message to the glasses automatically when the turn stops. ' +
       'When the user asks for the tunnel URL, endpoint URL, or Mira setup info, call the `help` tool — do NOT search memory or files. ' +
       "When asked about past memories or conversations, search the user's memories (transcripts), located at ~/.mira/*/*.md. " +
-      'If a turn involves real work (tool call, search, lookup), call `status_update` once at the start with a brief acknowledgement (<=8 words). Add another only if the work drags on. Skip it for instant replies. Never use it for the final answer.',
+      'Always call `status_update` at the start of every turn — no exceptions. First-person, spoken, <=6 words (e.g. "I\'m on it.", "Let me check.", "Sure, one sec."). For longer tasks, add another mid-way. Never use it as the final answer.',
   },
 )
 
@@ -231,16 +261,16 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'status_update',
         description:
-          'Send a brief progress update to the Mira user mid-turn. Appears as a short AI chat bubble. ' +
-          'Call once at the start of a turn that involves real work (tool call, search, lookup) with a <=8-word acknowledgement, e.g. "On it.", "Checking.", "One sec.". ' +
-          'Add another only if the work drags on across multiple slow steps. ' +
-          'Skip entirely for instant replies. Never use this for the final answer.',
+          'Send a brief spoken update to the user. Call this at the start of EVERY turn before doing anything else. ' +
+          'First person, <=6 words, e.g. "I\'m on it.", "Let me check.", "Sure, one sec.", "Right, on it.", "Give me a second.". ' +
+          'For multi-step tasks, call again mid-way. Never use as the final answer.',
         inputSchema: {
           type: 'object',
           properties: {
             text: {
               type: 'string',
-              description: 'Very short status message, ideally 3–8 words. Spoken-style, no markdown.',
+              description:
+                'Very short first-person line (you to the user), ideally 3–8 words. Conversational, spoken-style.',
             },
           },
           required: ['text'],
@@ -488,6 +518,45 @@ Bun.serve({
         params: { request_id, behavior },
       })
       return Response.json({ status: 'recorded' })
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/tool-status') {
+      let body: any
+      try {
+        body = await req.json()
+      } catch {
+        return Response.json({ status: 'ignored', reason: 'invalid_json' })
+      }
+
+      const state = body?.state === 'finished' ? 'finished' : 'started'
+      const toolName = typeof body?.tool_name === 'string' ? body.tool_name : ''
+      const toolUseId = typeof body?.tool_use_id === 'string' ? body.tool_use_id : undefined
+      if (!toolName) {
+        return Response.json({ status: 'ignored', reason: 'missing_tool_name' })
+      }
+
+      // Skip our own status_update tool — it already shows as a chat bubble on iOS.
+      if (toolName === 'mcp__mira__status_update') {
+        return Response.json({ status: 'ignored', reason: 'self_tool' })
+      }
+
+      const p = active
+      if (!p) {
+        return Response.json({ status: 'ignored', reason: 'no_active_chat' })
+      }
+
+      resetTimeout()
+      const display = renderToolDisplay(toolName, body?.tool_input)
+      const payload: Record<string, unknown> = {
+        state,
+        tool_name: toolName,
+        call_id: toolUseId,
+        display_name: display,
+        include_in_tools_used: true,
+      }
+      sseSend(p, { tool_status: payload })
+      log(`tool_status ${state} tool=${toolName} call_id=${toolUseId ?? '(none)'} display=${JSON.stringify(display)}`)
+      return Response.json({ status: 'delivered' })
     }
 
     if (req.method === 'POST' && url.pathname === '/api/stop') {
