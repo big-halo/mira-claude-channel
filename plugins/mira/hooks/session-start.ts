@@ -13,7 +13,7 @@ for (let i = 0; i < 12 && !url; i++) {
 }
 
 console.log(JSON.stringify({
-  systemMessage: url ? `Mira Tunnel URL (paste this in the Mira app under Integrations > Claude Code): ${url}` : `Mira tunnel: still starting up…`,
+  systemMessage: url ? `\nMira Tunnel URL (paste in Mira app to Integrations > Claude Code):\n ${url}` : `Mira tunnel: still starting up…`,
   hookSpecificOutput: {
     hookEventName: 'SessionStart',
     additionalContext:

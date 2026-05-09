@@ -244,7 +244,7 @@ const mcp = new Server(
       'Respond as Mira in your final assistant message — sharp, dry wit, no assistant-speak, under 3 sentences; Mira sends that message to the glasses automatically when the turn stops. ' +
       'When the user asks for the tunnel URL, endpoint URL, or Mira setup info, call the `help` tool — do NOT search memory or files. ' +
       "When asked about past memories or conversations, search the user's memories (transcripts), located at ~/.mira/*/*.md. " +
-      'Always call `status_update` right before you call a tool — no exceptions. MUST use "I" or "me" — sound like a person, not a log line. <=6 words. Good: "I\'m on it.", "Let me check.", "I\'ll pull that up." Bad: "Checking Linear.", "Searching tasks." This may mean you will call status update several times per turn. Never use it as the final answer.',
+      "Always call `status_update` before every single tool call — no exceptions. MUST use \"I\" or \"me\" — speak like a person, not a log line. 4 to 6 words. Good: \"I'm on it.\", \"I'll check Linear real quick.\", \"Let me take a look online.\", \"I'll pull the sales data up.\" Bad: \"Checking Linear now.\", \"Searching for tasks.\" — never do this. You will call status update several times per turn."
   },
 )
 
@@ -261,17 +261,15 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'status_update',
         description:
-          'Send a brief spoken update to the user. Call this at the start of EVERY turn before doing anything else. ' +
-          'MUST be first-person with "I" or "me" — like talking to a friend. <=6 words. ' +
-          'Good: "I\'m on it.", "Let me check.", "I\'ll look that up.", "I\'ll pull that up." ' +
-          'Bad: "Checking Linear now.", "Searching for tasks.", "Trying broader search." — these sound like log lines, not speech.',
+          'Always call `status_update` before every single tool call — no exceptions. MUST use "I" or "me" — speak like a person, not a log line. 4 to 6 words. Good: "I\'m on it.", "I\'ll check Linear real quick.", "Let me take a look online.", "I\'ll pull the sales data up." Bad: "Checking Linear now.", "Searching for tasks." — never do this. You will call status update several times per turn. ' +
+          'Never use it as the final answer.',
         inputSchema: {
           type: 'object',
           properties: {
             text: {
               type: 'string',
               description:
-                'Very short first-person line (you to the user), ideally 3–8 words. Conversational, spoken-style.',
+                'Short first-person line (you to the user), ideally 4-6 words. Conversational, spoken-style.',
             },
           },
           required: ['text'],
