@@ -435,6 +435,12 @@ Bun.serve({
     const ua = req.headers.get('user-agent') ?? ''
     log(`http ${req.method} ${url.pathname} ua=${ua.slice(0, 60)}`)
 
+    if (req.method === 'POST') {
+      const raw = await req.text()
+      log(`RAW BODY ${url.pathname}: ${raw}`)
+      req = new Request(req, { body: raw })
+    }
+
     if (req.method === 'GET' && url.pathname === '/health') {
       return Response.json({ status: 'ok', active: active !== null })
     }
@@ -588,7 +594,6 @@ Bun.serve({
 
       active = null
       clearTimeout(p.timer)
-      log(`stop OK text_len=${text.length}`)
       p.resolve({ text, sources: [], debug: null })
       return Response.json({ status: 'delivered' })
     }
@@ -619,17 +624,24 @@ Bun.serve({
       if (connection?.firstName) meta.user_first_name = connection.firstName
       if (connection?.lastName) meta.user_last_name = connection.lastName
 
+      const loc = body?.location
+      if (loc && typeof loc === 'object') {
+        if (typeof loc.latitude === 'number') meta.user_latitude = String(loc.latitude)
+        if (typeof loc.longitude === 'number') meta.user_longitude = String(loc.longitude)
+        if (typeof loc.address === 'string' && loc.address.trim()) meta.user_address = loc.address
+      }
 
-      log(`chat IN text=${JSON.stringify(userText.slice(0, 200))}`)
 
       const { entry, response } = openPendingChat()
-      log('mcp notify → notifications/claude/channel')
       try {
+        const channelParams = { content: userText, meta };
+        log('mcp notify: sending params:', channelParams);
         await mcp.notification({
           method: 'notifications/claude/channel',
-          params: { content: userText, meta },
-        })
-        log('mcp notify ✓')
+          params: channelParams,
+        });
+        log('mcp notify ✓');
+   
 
         return new Response(responseToSse(entry, response), {
           headers: { 'Content-Type': 'text/event-stream' },
