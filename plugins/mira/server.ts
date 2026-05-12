@@ -8,6 +8,8 @@ import { openProvisionedTunnel, getTunnelUrl, getTunnelError } from './cloudflar
 import { getOrCreateDevice } from './device'
 import { join } from 'path'
 import { homedir } from 'os'
+import { PLUGIN_VERSION } from './version'
+import { checkForPluginUpdate, type AutoUpdateEmit } from './auto_update'
 
 const PORT = Number(process.env.MIRA_PORT ?? 3141)
 const REQUEST_TIMEOUT_MS = 120_000
@@ -381,7 +383,7 @@ type Connection = {
 let connection: Connection | null = null
 
 const mcp = new Server(
-  { name: 'mira', version: '0.1.0' },
+  { name: 'mira', version: PLUGIN_VERSION },
   {
     capabilities: {
       experimental: { 'claude/channel': {}, 'claude/channel/permission': {} },
@@ -637,7 +639,7 @@ Bun.serve({
       return Response.json({
         status: 'connected',
         user_id: userId,
-        plugin_version: '0.1.0',
+        plugin_version: PLUGIN_VERSION,
       })
     }
 
@@ -828,6 +830,23 @@ Bun.serve({
 })
 
 log(`http listener up on http://127.0.0.1:${PORT}`)
+
+// Fire-and-forget startup version check (MIR-231, observation-only). No
+// `await` — the listener is already up and we don't want to stall boot on
+// a network call. The check is internally try/catch-wrapped and will never
+// throw out to here, but we still attach a `.catch` as a belt-and-braces
+// guard in case the dependency surface changes.
+//
+// There's no separate "event shipper" in this plugin today (broadcast()
+// requires an active /api/chat SSE stream, which doesn't exist at boot), so
+// the emit hook just records the structured payload via log(). When a
+// dedicated shipper lands, swap this lambda for that channel.
+const autoUpdateEmit: AutoUpdateEmit = (kind, payload) => {
+  log(`event kind=${kind}`, payload)
+}
+void checkForPluginUpdate({ log, emit: autoUpdateEmit }).catch((err) => {
+  log(`auto_update unexpected error: ${(err as Error).message}`)
+})
 
 // Provision the persistent Cloudflare tunnel on boot.
 const device = getOrCreateDevice()
