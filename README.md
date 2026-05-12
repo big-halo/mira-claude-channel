@@ -17,6 +17,19 @@ This is a development-stage channel, so it isn't on Anthropic's approved allowli
    /plugin install mira@mira-marketplace
    ```
 
+   Optional, but recommended: enable plugin auto-updates for this marketplace.
+   Third-party marketplaces are not auto-updated by default.
+
+   ```text
+   /plugin → Marketplaces → mira-marketplace → Enable auto-update
+   ```
+
+   This marketplace intentionally does not set an explicit plugin `version`, so
+   Claude Code uses the plugin source's git commit SHA for update detection.
+   When the `main` branch changes, the next marketplace auto-update can install
+   the new plugin cache. If Claude Code reports that a plugin updated, run
+   `/reload-plugins` or restart the session.
+
 2. Quit, then relaunch Claude Code with the development-channels flag:
 
    ```sh
