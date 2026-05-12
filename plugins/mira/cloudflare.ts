@@ -6,6 +6,8 @@ const TUNNEL_CACHE_DIR = `${CLOUDFLARED_DIR}/tunnels`
 // Persisted on disk so the SessionStart hook can read the current tunnel URL
 // without talking to the MCP server.
 const TUNNEL_URL_FILE = `${CLOUDFLARED_DIR}/tunnel.url`
+const CLOUDFLARED_READY_TIMEOUT_MS = 30_000
+const CLOUDFLARED_LOG_TAIL_SIZE = 8
 
 function tunnelCachePath(deviceId: string) {
   return `${TUNNEL_CACHE_DIR}/${deviceId}.json`
@@ -35,6 +37,21 @@ function writeTunnelUrlFile(url: string, log: (msg: string) => void) {
   } catch (err) {
     log(`tunnel.url write failed: ${(err as Error).message}`)
   }
+}
+
+function cloudflaredReady(line: string): boolean {
+  return /Registered tunnel connection/i.test(line) ||
+    /connection .* registered/i.test(line)
+}
+
+function trimLogTail(lines: string[]) {
+  if (lines.length > CLOUDFLARED_LOG_TAIL_SIZE) {
+    lines.splice(0, lines.length - CLOUDFLARED_LOG_TAIL_SIZE)
+  }
+}
+
+function summarizeTail(lines: string[]): string {
+  return lines.join(' | ').slice(0, 500)
 }
 
 async function ensureCloudflared(log: (msg: string) => void): Promise<string> {
@@ -131,33 +148,90 @@ export async function openProvisionedTunnel(opts: ProvisionOptions): Promise<voi
     return
   }
 
-  const binary = await ensureCloudflared(opts.log)
+  let binary: string
+  try {
+    binary = await ensureCloudflared(opts.log)
+  } catch (err) {
+    tunnelError = `Cloudflared setup failed: ${(err as Error).message}`
+    opts.log(`cloudflared setup failed: ${(err as Error).message}`)
+    return
+  }
   const url = `https://${provisioned.hostname}`
-  tunnelUrl = url
-  tunnelError = null
-  writeTunnelUrlFile(url, opts.log)
 
   opts.log(`tunnel opening (provisioned) hostname=${provisioned.hostname}`)
-  const proc = Bun.spawn(
-    [binary, 'tunnel', 'run', '--token', provisioned.token],
-    {
-      stderr: 'pipe',
-      stdout: 'pipe',
-      onExit: (_, code) => {
-        opts.log(`cloudflared exited code=${code}`)
-        tunnelUrl = null
-        tunnelError = 'Tunnel closed. Restart the plugin to reconnect.'
-        clearTunnelUrlFile(opts.log)
+  const logTail: string[] = []
+  let ready = false
+  let settleReady: (value: boolean) => void = () => {}
+  const readyPromise = new Promise<boolean>((resolve) => {
+    settleReady = resolve
+  })
+  const readyTimer = setTimeout(() => {
+    if (ready) return
+    tunnelError = `Cloudflared did not confirm a tunnel connection within ${CLOUDFLARED_READY_TIMEOUT_MS / 1000}s. Restart Claude Code to retry.`
+    if (logTail.length) tunnelError += ` Last log: ${summarizeTail(logTail)}`
+    opts.log(`cloudflared ready timeout hostname=${provisioned.hostname} tail=${summarizeTail(logTail)}`)
+    settleReady(false)
+  }, CLOUDFLARED_READY_TIMEOUT_MS)
+
+  let proc: ReturnType<typeof Bun.spawn>
+  try {
+    proc = Bun.spawn(
+      [binary, 'tunnel', 'run', '--token', provisioned.token],
+      {
+        stderr: 'pipe',
+        stdout: 'pipe',
+        onExit: (_, code) => {
+          opts.log(`cloudflared exited code=${code}`)
+          tunnelUrl = null
+          clearTunnelUrlFile(opts.log)
+          if (!ready) {
+            tunnelError = `Cloudflared exited before the tunnel was ready (code ${code}). Restart Claude Code to retry.`
+            if (logTail.length) tunnelError += ` Last log: ${summarizeTail(logTail)}`
+            clearTimeout(readyTimer)
+            settleReady(false)
+          } else {
+            tunnelError = 'Tunnel closed. Restart the plugin to reconnect.'
+          }
+        },
       },
-    },
-  )
+    )
+  } catch (err) {
+    clearTimeout(readyTimer)
+    tunnelError = `Cloudflared failed to start: ${(err as Error).message}`
+    opts.log(`cloudflared spawn failed: ${(err as Error).message}`)
+    return
+  }
 
   ;(async () => {
     const decoder = new TextDecoder()
     for await (const chunk of proc.stderr as ReadableStream<Uint8Array>) {
-      opts.log(`cloudflared stderr ${decoder.decode(chunk).trim()}`)
+      for (const line of decoder.decode(chunk).split(/\r?\n/)) {
+        const trimmed = line.trim()
+        if (!trimmed) continue
+        logTail.push(trimmed)
+        trimLogTail(logTail)
+        opts.log(`cloudflared stderr ${trimmed}`)
+        if (!ready && cloudflaredReady(trimmed)) {
+          ready = true
+          clearTimeout(readyTimer)
+          settleReady(true)
+        }
+      }
     }
   })()
+
+  const isReady = await readyPromise
+  if (!isReady) {
+    try { proc.kill() } catch { /* best-effort */ }
+    tunnelUrl = null
+    clearTunnelUrlFile(opts.log)
+    return
+  }
+
+  tunnelUrl = url
+  tunnelError = null
+  writeTunnelUrlFile(url, opts.log)
+  opts.log(`tunnel ready hostname=${provisioned.hostname}`)
 
   const killChild = () => {
     try { proc.kill() } catch { /* best-effort */ }
