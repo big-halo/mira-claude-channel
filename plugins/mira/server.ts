@@ -7,6 +7,11 @@ import { appendFileSync, mkdirSync, writeFileSync, existsSync } from 'fs'
 import { openProvisionedTunnel, getTunnelUrl, getTunnelError } from './cloudflare'
 import { getOrCreateDevice } from './device'
 import { PluginEventShipper } from './events'
+import {
+  appendUpdateNotice,
+  checkPluginUpdateState,
+  type UpdateState,
+} from './plugin_update'
 import { join } from 'path'
 import { homedir } from 'os'
 
@@ -15,7 +20,9 @@ const REQUEST_TIMEOUT_MS = 120_000
 // Periodic SSE comment to keep idle connections alive when no
 // status_update / tool_status events are firing.
 const SSE_HEARTBEAT_MS = Number(process.env.MIRA_SSE_HEARTBEAT_MS ?? 15_000)
-const TUNNEL_BACKEND_URL = 'http://localhost:8000'
+const TUNNEL_BACKEND_URL = 'https://glass-staging.thebighalo.com'
+const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT ?? import.meta.dir
+const UPDATE_CHECK_TTL_MS = 5 * 60_000
 
 const LOG_FILE = process.env.MIRA_LOG ?? '/tmp/mira.log'
 function log(msg: string, extra?: unknown) {
@@ -52,6 +59,51 @@ function emit(kind: string, payload: Record<string, unknown> = {}, level: 'info'
 function basename(p: string): string {
   const i = p.lastIndexOf('/')
   return i >= 0 ? p.slice(i + 1) : p
+}
+
+let updateState: UpdateState = {
+  checkedAt: 0,
+  stale: false,
+  localVersion: null,
+  status: null,
+}
+let updateCheckInFlight: Promise<UpdateState> | null = null
+
+async function refreshUpdateState(): Promise<UpdateState> {
+  updateState = await checkPluginUpdateState({ pluginRoot: PLUGIN_ROOT })
+  log(
+    `plugin update check local=${updateState.localVersion ?? '(unknown)'} ` +
+      `status=${updateState.status ?? '(unknown)'} stale=${updateState.stale}`,
+  )
+  return updateState
+}
+
+async function currentUpdateState(): Promise<UpdateState> {
+  const now = Date.now()
+  if (now - updateState.checkedAt < UPDATE_CHECK_TTL_MS) return updateState
+
+  if (!updateCheckInFlight) {
+    updateCheckInFlight = refreshUpdateState()
+      .catch((err) => {
+        log(`plugin update check failed: ${(err as Error).message}`)
+        updateState = {
+          ...updateState,
+          checkedAt: Date.now(),
+          status: 'check_failed',
+        }
+        return updateState
+      })
+      .finally(() => {
+        updateCheckInFlight = null
+      })
+  }
+
+  return updateCheckInFlight
+}
+
+async function withUpdateNotice(text: string): Promise<string> {
+  const state = await currentUpdateState()
+  return appendUpdateNotice(text, state)
 }
 
 // Generic "Tool: <hint>" formatter. We don't hardcode per-tool rules; instead
@@ -407,9 +459,7 @@ const mcp = new Server(
     instructions:
       'Messages from the Mira glasses arrive as <channel source="mira"> tags. ' +
       'The body of the tag is the user\'s spoken/typed message. ' +
-      'Respond as Mira in your final assistant message — sharp, dry wit, no assistant-speak, under 3 sentences; Mira sends that message to the glasses automatically when the turn stops. ' +
       'When the user asks for the tunnel URL, endpoint URL, or Mira setup info, call the `help` tool — do NOT search memory or files. ' +
-      "When asked about past memories or conversations, search the user's memories (transcripts), located at ~/.mira/*/*.md. " +
       "Always call `status_update` before every single tool call — no exceptions. MUST use \"I\" or \"me\" — speak like a person, not a log line. 4 to 6 words. Good: \"I'm on it.\", \"I'll check Linear real quick.\", \"Let me take a look online.\", \"I'll pull the sales data up.\" Bad: \"Checking Linear now.\", \"Searching for tasks.\" — never do this. You will call status update several times per turn."
   },
 )
@@ -767,10 +817,11 @@ Bun.serve({
         return Response.json({ status: 'ignored', reason: 'no_active_chat' })
       }
 
+      const responseText = await withUpdateNotice(text)
       active = null
       clearTimeout(p.timer)
       emit('stop_ok', { text_len: text.length })
-      p.resolve({ text, sources: [], debug: null })
+      p.resolve({ text: responseText, sources: [], debug: null })
       return Response.json({ status: 'delivered' })
     }
 
@@ -865,6 +916,10 @@ Bun.serve({
 })
 
 log(`http listener up on http://127.0.0.1:${PORT}`)
+
+void currentUpdateState().catch((err) => {
+  log(`plugin update check failed: ${(err as Error).message}`)
+})
 
 // Provision the persistent Cloudflare tunnel on boot.
 const device = getOrCreateDevice()
