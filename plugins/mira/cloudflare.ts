@@ -67,16 +67,35 @@ async function ensureCloudflared(log: (msg: string) => void): Promise<string> {
 }
 
 type ProvisionResponse = { hostname: string; token: string }
+type TunnelEventLevel = 'info' | 'warn' | 'error'
 
 type ProvisionOptions = {
   deviceId: string
   deviceLabel: string
   backendBaseUrl: string
   log: (msg: string) => void
+  emit?: (kind: string, payload?: Record<string, unknown>, level?: TunnelEventLevel) => void
+}
+
+function emitTunnelEvent(
+  opts: ProvisionOptions,
+  kind: string,
+  payload: Record<string, unknown> = {},
+  level: TunnelEventLevel = 'info',
+) {
+  opts.emit?.(kind, payload, level)
+}
+
+function sanitizeCloudflaredLog(value: string): string {
+  return value
+    .replace(/(--token\s+)[^\s]+/gi, '$1[redacted]')
+    .replace(/\btoken[=:][^\s,]+/gi, 'token=[redacted]')
+    .slice(0, 500)
 }
 
 async function fetchProvisionedTunnel(opts: ProvisionOptions): Promise<ProvisionResponse | null> {
   try {
+    emitTunnelEvent(opts, 'tunnel_provision_start', { backend_base_url: opts.backendBaseUrl })
     const res = await fetch(`${opts.backendBaseUrl}/tunnels/provision`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -87,17 +106,26 @@ async function fetchProvisionedTunnel(opts: ProvisionOptions): Promise<Provision
     })
     if (!res.ok) {
       const body = await res.text().catch(() => '')
-      opts.log(`tunnel provision failed status=${res.status} body=${body}`)
+      opts.log(`tunnel provision failed status=${res.status} body=${body.slice(0, 200)}`)
+      emitTunnelEvent(
+        opts,
+        'tunnel_provision_failed',
+        { status: res.status, body_len: body.length },
+        'error',
+      )
       return null
     }
     const data = (await res.json()) as ProvisionResponse
     if (!data?.hostname || !data?.token) {
       opts.log(`tunnel provision malformed response`)
+      emitTunnelEvent(opts, 'tunnel_provision_malformed', {}, 'error')
       return null
     }
+    emitTunnelEvent(opts, 'tunnel_provision_ok', { hostname: data.hostname })
     return data
   } catch (err) {
     opts.log(`tunnel provision error: ${(err as Error).stack ?? (err as Error).message}`)
+    emitTunnelEvent(opts, 'tunnel_provision_error', { error: (err as Error).message }, 'error')
     return null
   }
 }
@@ -112,6 +140,7 @@ export async function openProvisionedTunnel(opts: ProvisionOptions): Promise<voi
 
   if (!provisioned) {
     tunnelError = 'Could not provision tunnel from backend. Reconnect to retry.'
+    emitTunnelEvent(opts, 'tunnel_unavailable', { stage: 'provision', error: tunnelError }, 'error')
     return
   }
 
@@ -121,11 +150,18 @@ export async function openProvisionedTunnel(opts: ProvisionOptions): Promise<voi
   } catch (err) {
     tunnelError = `Cloudflared setup failed: ${(err as Error).message}`
     opts.log(`cloudflared setup failed: ${(err as Error).message}`)
+    emitTunnelEvent(
+      opts,
+      'cloudflared_setup_failed',
+      { hostname: provisioned.hostname, error: (err as Error).message },
+      'error',
+    )
     return
   }
   const url = `https://${provisioned.hostname}`
 
   opts.log(`tunnel opening (provisioned) hostname=${provisioned.hostname}`)
+  emitTunnelEvent(opts, 'cloudflared_start', { hostname: provisioned.hostname })
   const logTail: string[] = []
   let ready = false
   let settleReady: (value: boolean) => void = () => {}
@@ -137,6 +173,16 @@ export async function openProvisionedTunnel(opts: ProvisionOptions): Promise<voi
     tunnelError = `Cloudflared did not confirm a tunnel connection within ${CLOUDFLARED_READY_TIMEOUT_MS / 1000}s. Restart Claude Code to retry.`
     if (logTail.length) tunnelError += ` Last log: ${summarizeTail(logTail)}`
     opts.log(`cloudflared ready timeout hostname=${provisioned.hostname} tail=${summarizeTail(logTail)}`)
+    emitTunnelEvent(
+      opts,
+      'cloudflared_ready_timeout',
+      {
+        hostname: provisioned.hostname,
+        timeout_ms: CLOUDFLARED_READY_TIMEOUT_MS,
+        log_tail: sanitizeCloudflaredLog(summarizeTail(logTail)),
+      },
+      'error',
+    )
     settleReady(false)
   }, CLOUDFLARED_READY_TIMEOUT_MS)
 
@@ -149,15 +195,38 @@ export async function openProvisionedTunnel(opts: ProvisionOptions): Promise<voi
         stdout: 'pipe',
         onExit: (_, code) => {
           opts.log(`cloudflared exited code=${code}`)
+          emitTunnelEvent(
+            opts,
+            'cloudflared_exit',
+            { hostname: provisioned.hostname, code, ready },
+            ready ? 'warn' : 'error',
+          )
           tunnelUrl = null
           clearTunnelUrlFile(opts.log)
           if (!ready) {
             tunnelError = `Cloudflared exited before the tunnel was ready (code ${code}). Restart Claude Code to retry.`
             if (logTail.length) tunnelError += ` Last log: ${summarizeTail(logTail)}`
+            emitTunnelEvent(
+              opts,
+              'tunnel_unavailable',
+              {
+                stage: 'cloudflared_exit_before_ready',
+                hostname: provisioned.hostname,
+                code,
+                log_tail: sanitizeCloudflaredLog(summarizeTail(logTail)),
+              },
+              'error',
+            )
             clearTimeout(readyTimer)
             settleReady(false)
           } else {
             tunnelError = 'Tunnel closed. Restart the plugin to reconnect.'
+            emitTunnelEvent(
+              opts,
+              'tunnel_closed',
+              { hostname: provisioned.hostname, error: tunnelError },
+              'warn',
+            )
           }
         },
       },
@@ -166,6 +235,12 @@ export async function openProvisionedTunnel(opts: ProvisionOptions): Promise<voi
     clearTimeout(readyTimer)
     tunnelError = `Cloudflared failed to start: ${(err as Error).message}`
     opts.log(`cloudflared spawn failed: ${(err as Error).message}`)
+    emitTunnelEvent(
+      opts,
+      'cloudflared_start_failed',
+      { hostname: provisioned.hostname, error: (err as Error).message },
+      'error',
+    )
     return
   }
 
@@ -178,9 +253,18 @@ export async function openProvisionedTunnel(opts: ProvisionOptions): Promise<voi
         logTail.push(trimmed)
         trimLogTail(logTail)
         opts.log(`cloudflared stderr ${trimmed}`)
+        if (/\b(ERR|error|failed|timeout)\b/i.test(trimmed)) {
+          emitTunnelEvent(
+            opts,
+            'cloudflared_log_error',
+            { hostname: provisioned.hostname, line: sanitizeCloudflaredLog(trimmed) },
+            'warn',
+          )
+        }
         if (!ready && cloudflaredReady(trimmed)) {
           ready = true
           clearTimeout(readyTimer)
+          emitTunnelEvent(opts, 'cloudflared_ready', { hostname: provisioned.hostname })
           settleReady(true)
         }
       }

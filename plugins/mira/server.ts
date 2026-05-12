@@ -942,6 +942,7 @@ void openProvisionedTunnel({
   deviceLabel: device.device_label,
   backendBaseUrl: TUNNEL_BACKEND_URL,
   log,
+  emit,
 })
   .then(async () => {
     const url = getTunnelUrl()
