@@ -19,7 +19,7 @@ const REQUEST_TIMEOUT_MS = 120_000
 // Periodic SSE comment to keep idle connections alive when no
 // status_update / tool_status events are firing.
 const SSE_HEARTBEAT_MS = Number(process.env.MIRA_SSE_HEARTBEAT_MS ?? 15_000)
-const TUNNEL_BACKEND_URL = 'http://localhost:8000'
+const TUNNEL_BACKEND_URL = 'https://glass-staging.thebighalo.com'
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT ?? import.meta.dir
 const UPDATE_CHECK_TTL_MS = 5 * 60_000
 
@@ -442,9 +442,7 @@ const mcp = new Server(
     instructions:
       'Messages from the Mira glasses arrive as <channel source="mira"> tags. ' +
       'The body of the tag is the user\'s spoken/typed message. ' +
-      'Respond as Mira in your final assistant message — sharp, dry wit, no assistant-speak, under 3 sentences; Mira sends that message to the glasses automatically when the turn stops. ' +
       'When the user asks for the tunnel URL, endpoint URL, or Mira setup info, call the `help` tool — do NOT search memory or files. ' +
-      "When asked about past memories or conversations, search the user's memories (transcripts), located at ~/.mira/*/*.md. " +
       "Always call `status_update` before every single tool call — no exceptions. MUST use \"I\" or \"me\" — speak like a person, not a log line. 4 to 6 words. Good: \"I'm on it.\", \"I'll check Linear real quick.\", \"Let me take a look online.\", \"I'll pull the sales data up.\" Bad: \"Checking Linear now.\", \"Searching for tasks.\" — never do this. You will call status update several times per turn."
   },
 )
