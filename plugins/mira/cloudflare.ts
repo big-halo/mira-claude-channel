@@ -56,17 +56,6 @@ type ProvisionOptions = {
   deviceLabel: string
   backendBaseUrl: string
   log: (msg: string) => void
-  /**
-   * Optional structured-event emitter. When provided, mid-session
-   * cloudflared exits ship a `tunnel_closed` event to the backend so
-   * triage can tell "tunnel was up, then went down" apart from
-   * "tunnel never came up" (= existing `tunnel_error`).
-   */
-  emit?: (
-    kind: string,
-    payload?: Record<string, unknown>,
-    level?: 'info' | 'warn' | 'error',
-  ) => void
 }
 
 async function fetchProvisionedTunnel(opts: ProvisionOptions): Promise<ProvisionResponse | null> {
@@ -122,20 +111,10 @@ export async function openProvisionedTunnel(opts: ProvisionOptions): Promise<voi
       stderr: 'pipe',
       stdout: 'pipe',
       onExit: (_, code) => {
-        const wasUp = tunnelUrl !== null
         opts.log(`cloudflared exited code=${code}`)
         tunnelUrl = null
         tunnelError = 'Tunnel closed. Restart the plugin to reconnect.'
         clearTunnelUrlFile(opts.log)
-        // Only emit if the tunnel was actually up before — if cloudflared
-        // failed to start at all, the caller has already shipped `tunnel_error`.
-        if (wasUp && opts.emit) {
-          opts.emit(
-            'tunnel_closed',
-            { exit_code: code ?? null, hostname: provisioned?.hostname },
-            'error',
-          )
-        }
       },
     },
   )

@@ -15,13 +15,6 @@ import {
   type UpdateState,
 } from './plugin_update'
 import { PluginEventShipper } from './events'
-import {
-  type AgentSessionBootstrap,
-  SESSION_BOOTSTRAP_FILE,
-  buildChannelContent,
-  buildChannelMeta,
-  summarizeSessionBootstrap,
-} from './agent-context'
 import { join } from 'path'
 import { homedir } from 'os'
 
@@ -56,10 +49,9 @@ function safeStringify(value: unknown): string {
   }
 }
 
-// Structured event shipper — see ./events.ts. Mirrors the same lifecycle the
-// `log()` helper covers, but ships JSON events to the Mira backend
-// (`/telemetry/plugin-events`) so the observability-platform dashboard can
-// render a timeline. Free-form `log()` lines still flow to /tmp/mira.log.
+// Structured event shipper — batches JSON events to /telemetry/plugin-events
+// so the observability-platform dashboard can render a channel timeline.
+// Free-form log() lines still go to /tmp/mira.log; these are additive.
 const events = new PluginEventShipper({ log })
 events.start()
 
@@ -459,24 +451,6 @@ type Connection = {
   connectedAt: number
 }
 let connection: Connection | null = null
-let sessionBootstrap: AgentSessionBootstrap | null = null
-
-function persistSessionBootstrap(payload: AgentSessionBootstrap) {
-  sessionBootstrap = payload
-  const summary = summarizeSessionBootstrap(payload)
-  const record = {
-    ...payload,
-    summary,
-    updated_at: new Date().toISOString(),
-  }
-  mkdirSync(join(homedir(), '.mira'), { recursive: true })
-  writeFileSync(SESSION_BOOTSTRAP_FILE, JSON.stringify(record, null, 2), 'utf8')
-  if (connection?.userId) {
-    const userDir = join(homedir(), '.mira', connection.userId)
-    mkdirSync(userDir, { recursive: true })
-    writeFileSync(join(userDir, 'session-bootstrap.json'), JSON.stringify(record, null, 2), 'utf8')
-  }
-}
 
 const mcp = new Server(
   { name: 'mira', version: '0.1.0' },
@@ -674,12 +648,10 @@ log('mcp stdio connected')
 const shutdown = (reason: string) => {
   log(`shutdown reason=${reason}`)
   emit('shutdown', { reason })
-  // Best-effort flush of any queued events before we exit.
   void events.flush().finally(() => {
     events.stop()
     process.exit(0)
   })
-  // Belt-and-braces: hard-exit after a short delay in case flush hangs.
   setTimeout(() => process.exit(0), 1_500)
 }
 process.stdin.on('end', () => shutdown('stdin end'))
@@ -748,11 +720,7 @@ Bun.serve({
       })
 
       log(`connect OK user_id=${userId} backend=${backendBaseUrl} token_len=${accessToken.length}`)
-      emit('connect', {
-        user_id: userId,
-        backend_base_url: backendBaseUrl,
-        token_len: accessToken.length,
-      })
+      emit('connect', { user_id: userId, backend_base_url: backendBaseUrl, token_len: accessToken.length })
       return Response.json({
         status: 'connected',
         user_id: userId,
@@ -777,7 +745,6 @@ Bun.serve({
       connection = null
       log(`disconnect was_connected=${wasConnected} user_id=${userId ?? '(none)'}`)
       emit('disconnect', { was_connected: wasConnected, user_id: userId ?? null })
-      // Flush any queued events while we still know who the user was.
       void events.flush().finally(() => events.setConnection(null))
       return Response.json({ status: 'disconnected' })
     }
@@ -789,7 +756,6 @@ Bun.serve({
         return Response.json({ error: 'missing request_id or response' }, { status: 400 })
       }
       log(`permission_response request_id=${request_id} response=${response}`)
-      emit('permission_response', { request_id, response })
       resetTimeout()
       const behavior = response === 'allow' ? 'allow' : 'deny'
       await mcp.notification({
@@ -869,29 +835,6 @@ Bun.serve({
       return Response.json({ status: 'delivered' })
     }
 
-    if (req.method === 'POST' && url.pathname === '/api/session-context') {
-      if (!connection) {
-        return Response.json({ error: 'not connected' }, { status: 401 })
-      }
-
-      let body: AgentSessionBootstrap
-      try {
-        body = await req.json()
-      } catch {
-        log('http /api/session-context invalid json')
-        return Response.json({ error: 'invalid json' }, { status: 400 })
-      }
-
-      persistSessionBootstrap(body)
-      log(`session-context OK reason=${body.bootstrap_reason ?? '(none)'} session=${body.session_id ?? '(none)'}`)
-      emit('session_context', {
-        reason: body.bootstrap_reason ?? null,
-        session_id: body.session_id ?? null,
-        message_count: Array.isArray(body.messages) ? body.messages.length : 0,
-        memory_count: Array.isArray(body.recent_memories) ? body.recent_memories.length : 0,
-      })
-      return Response.json({ status: 'stored' })
-    }
 
     // Reattach a fresh SSE stream to an existing chat session.
     if ((req.method === 'GET' || req.method === 'POST') && url.pathname === '/api/chat/reconnect') {
@@ -920,7 +863,7 @@ Bun.serve({
     if (req.method === 'POST' && url.pathname === '/api/chat') {
       // A new chat supersedes any in-flight one (the model can only answer one at a time)
       closeActive('superseded')
-      let body: AgentSessionBootstrap
+      let body: any
       try {
         body = await req.json()
       } catch {
@@ -928,36 +871,45 @@ Bun.serve({
         return new Response('invalid json', { status: 400 })
       }
 
-      persistSessionBootstrap({ ...body, bootstrap_reason: body.bootstrap_reason ?? 'chat' })
-
-      const messages = body.messages ?? []
+      const messages: Array<{ speaker?: number; content?: string; text?: string }> =
+        body?.messages ?? []
       const last = messages[messages.length - 1]
-      const userText = (last?.content ?? last?.text ?? '').toString().trim()
+      const userText = (last?.content ?? last?.text ?? '').toString()
       if (!userText) {
         log('http /api/chat empty content', body)
         return Response.json({ error: { message: 'no message content' } }, { status: 400 })
       }
 
-      const channelContent = buildChannelContent(body)
-      const meta = buildChannelMeta(body)
-      const loc = body.location
+      const meta: Record<string, string> = {}
+      if (typeof body?.user_local_time === 'string') meta.user_local_time = body.user_local_time
+      if (typeof body?.user_timezone === 'string') meta.user_timezone = body.user_timezone
+      const firstName = typeof body?.first_name === 'string' ? body.first_name.trim() : ''
+      const lastName = typeof body?.last_name === 'string' ? body.last_name.trim() : ''
+      if (firstName) meta.user_first_name = firstName
+      if (lastName) meta.user_last_name = lastName
+
+      const loc = body?.location
+      if (loc && typeof loc === 'object') {
+        if (typeof loc.latitude === 'number') meta.user_latitude = String(loc.latitude)
+        if (typeof loc.longitude === 'number') meta.user_longitude = String(loc.longitude)
+        if (typeof loc.address === 'string' && loc.address.trim()) meta.user_address = loc.address
+      }
+
 
       const { entry, response } = openPendingChat()
       emit('chat_in', {
         text_len: userText.length,
         has_location: !!(loc && typeof loc === 'object'),
         has_user_name: !!((body.first_name ?? '').trim() || (body.last_name ?? '').trim()),
-        transcript_messages: Math.max(0, messages.length - 1),
       })
       try {
-        const channelParams = { content: channelContent, meta }
+        const channelParams = { content: userText, meta }
         log('mcp notify: sending params:', channelParams)
         await mcp.notification({
           method: 'notifications/claude/channel',
           params: channelParams,
         })
         log('mcp notify ✓')
-   
 
         return new Response(responseToSse(entry, response), {
           headers: { 'Content-Type': 'text/event-stream' },
@@ -990,7 +942,6 @@ void openProvisionedTunnel({
   deviceLabel: device.device_label,
   backendBaseUrl: TUNNEL_BACKEND_URL,
   log,
-  emit,
 })
   .then(async () => {
     const url = getTunnelUrl()
