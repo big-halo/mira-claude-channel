@@ -16,6 +16,7 @@ import {
   checkPluginUpdateState,
   TUNNEL_BLOCKED_MESSAGE,
 } from '../plugin_update'
+import { SESSION_BOOTSTRAP_FILE, summarizeSessionBootstrap } from '../agent-context'
 
 const URL_FILE = `${process.env.HOME}/.mira-mcp/tunnel.url`
 const ERROR_FILE = `${process.env.HOME}/.mira-mcp/tunnel.error`
@@ -55,6 +56,18 @@ if (!channelsActive) {
 }
 
 const agentPrompt = (await Bun.file(AGENT_FILE).text().catch(() => '')).trim()
+let bootstrapContext = ''
+try {
+  const raw = (await Bun.file(SESSION_BOOTSTRAP_FILE).text().catch(() => '')).trim()
+  if (raw) {
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    bootstrapContext = summarizeSessionBootstrap(parsed)
+  }
+} catch {
+  bootstrapContext = ''
+}
+
+const additionalContext = [agentPrompt, bootstrapContext].filter(Boolean).join('\n\n')
 
 let systemMessage: string
 try {
@@ -77,6 +90,6 @@ console.log(JSON.stringify({
   systemMessage,
   hookSpecificOutput: {
     hookEventName: 'SessionStart',
-    additionalContext: agentPrompt,
+    additionalContext,
   },
 }))

@@ -14,6 +14,14 @@ import {
   TUNNEL_BLOCKED_MESSAGE,
   type UpdateState,
 } from './plugin_update'
+import { PluginEventShipper } from './events'
+import {
+  type AgentSessionBootstrap,
+  SESSION_BOOTSTRAP_FILE,
+  buildChannelContent,
+  buildChannelMeta,
+  summarizeSessionBootstrap,
+} from './agent-context'
 import { join } from 'path'
 import { homedir } from 'os'
 
@@ -46,6 +54,17 @@ function safeStringify(value: unknown): string {
   } catch {
     return String(value)
   }
+}
+
+// Structured event shipper — see ./events.ts. Mirrors the same lifecycle the
+// `log()` helper covers, but ships JSON events to the Mira backend
+// (`/telemetry/plugin-events`) so the observability-platform dashboard can
+// render a timeline. Free-form `log()` lines still flow to /tmp/mira.log.
+const events = new PluginEventShipper({ log })
+events.start()
+
+function emit(kind: string, payload: Record<string, unknown> = {}, level: 'info' | 'warn' | 'error' = 'info') {
+  events.emit(kind, payload, level)
 }
 
 function basename(p: string): string {
@@ -179,6 +198,7 @@ async function syncConversationsToMarkdown() {
 }
 
 log(`boot pid=${process.pid} port=${PORT} log=${LOG_FILE}`)
+emit('boot', { pid: process.pid, port: PORT, log_file: LOG_FILE })
 
 type BufferedEvent = { id: number; payload: string }
 
@@ -246,6 +266,7 @@ function closeActive(reason: ChatCloseReason) {
   if (!p) return
   active = null
   clearTimeout(p.timer)
+  emit(reason === 'timeout' ? 'chat_timeout' : 'chat_superseded', { reason }, reason === 'timeout' ? 'warn' : 'info')
   p.reject(new ChatClosedError(reason))
 }
 
@@ -348,11 +369,15 @@ async function runStreamLifecycle(
       broadcast(p, { text: payload.text })
       broadcast(p, { sources: payload.sources })
       emitDone(p)
+      emit('chat_done', { text_len: payload.text.length, sources: (payload.sources as unknown[]).length })
     }
   } catch (err) {
     const message = err instanceof ChatClosedError ? err.reason : 'failed'
     if (!p.doneSent) {
       broadcast(p, { error: message })
+    }
+    if (!(err instanceof ChatClosedError)) {
+      emit('error', { stage: 'chat_sse', message: (err as Error).message ?? String(err) }, 'error')
     }
     scheduleSessionCleanup(p)
   } finally {
@@ -434,6 +459,24 @@ type Connection = {
   connectedAt: number
 }
 let connection: Connection | null = null
+let sessionBootstrap: AgentSessionBootstrap | null = null
+
+function persistSessionBootstrap(payload: AgentSessionBootstrap) {
+  sessionBootstrap = payload
+  const summary = summarizeSessionBootstrap(payload)
+  const record = {
+    ...payload,
+    summary,
+    updated_at: new Date().toISOString(),
+  }
+  mkdirSync(join(homedir(), '.mira'), { recursive: true })
+  writeFileSync(SESSION_BOOTSTRAP_FILE, JSON.stringify(record, null, 2), 'utf8')
+  if (connection?.userId) {
+    const userDir = join(homedir(), '.mira', connection.userId)
+    mkdirSync(userDir, { recursive: true })
+    writeFileSync(join(userDir, 'session-bootstrap.json'), JSON.stringify(record, null, 2), 'utf8')
+  }
+}
 
 const mcp = new Server(
   { name: 'mira', version: '0.1.0' },
@@ -493,6 +536,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     const p = active
     if (!p) {
       log(`status_update DROPPED no active chat text=${JSON.stringify(text.slice(0, 120))}`)
+      emit('status_update_dropped', {}, 'warn')
       return {
         content: [
           { type: 'text', text: 'No active Mira chat — status not delivered.' },
@@ -503,6 +547,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     const displayText = text.endsWith('...') ? text : `${text}...`
     broadcast(p, { status_update: { text: displayText } })
     log(`status_update OK text=${JSON.stringify(text.slice(0, 120))}`)
+    emit('status_update', {})
     return {
       content: [
         { type: 'text', text: 'Status delivered to Mira. Continue working on the final answer.' },
@@ -564,6 +609,7 @@ const PermissionRequestSchema = z.object({
 mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
   const { request_id, tool_name, description, input_preview } = params
   log(`permission_request request_id=${request_id} tool=${tool_name}`)
+  emit('permission_request', { request_id, tool_name, description: description.slice(0, 200) })
   const p = active
   if (!p) {
     log(`permission_request DROPPED no active chat (local terminal will handle)`)
@@ -627,7 +673,14 @@ log('mcp stdio connected')
 // alive forever after stdio closes.
 const shutdown = (reason: string) => {
   log(`shutdown reason=${reason}`)
-  process.exit(0)
+  emit('shutdown', { reason })
+  // Best-effort flush of any queued events before we exit.
+  void events.flush().finally(() => {
+    events.stop()
+    process.exit(0)
+  })
+  // Belt-and-braces: hard-exit after a short delay in case flush hangs.
+  setTimeout(() => process.exit(0), 1_500)
 }
 process.stdin.on('end', () => shutdown('stdin end'))
 process.stdin.on('close', () => shutdown('stdin close'))
@@ -688,12 +741,18 @@ Bun.serve({
         backendBaseUrl,
         connectedAt: Date.now(),
       }
+      events.setConnection({ userId, accessToken, backendBaseUrl })
 
       void syncConversationsToMarkdown().catch((err) => {
         log(`conversation sync failed: ${(err as Error).stack ?? (err as Error).message}`)
       })
 
       log(`connect OK user_id=${userId} backend=${backendBaseUrl} token_len=${accessToken.length}`)
+      emit('connect', {
+        user_id: userId,
+        backend_base_url: backendBaseUrl,
+        token_len: accessToken.length,
+      })
       return Response.json({
         status: 'connected',
         user_id: userId,
@@ -717,6 +776,9 @@ Bun.serve({
       const userId = connection?.userId
       connection = null
       log(`disconnect was_connected=${wasConnected} user_id=${userId ?? '(none)'}`)
+      emit('disconnect', { was_connected: wasConnected, user_id: userId ?? null })
+      // Flush any queued events while we still know who the user was.
+      void events.flush().finally(() => events.setConnection(null))
       return Response.json({ status: 'disconnected' })
     }
 
@@ -727,6 +789,7 @@ Bun.serve({
         return Response.json({ error: 'missing request_id or response' }, { status: 400 })
       }
       log(`permission_response request_id=${request_id} response=${response}`)
+      emit('permission_response', { request_id, response })
       resetTimeout()
       const behavior = response === 'allow' ? 'allow' : 'deny'
       await mcp.notification({
@@ -772,6 +835,7 @@ Bun.serve({
       }
       broadcast(p, { tool_status: payload })
       log(`tool_status ${state} tool=${toolName} call_id=${toolUseId ?? '(none)'} display=${JSON.stringify(display)}`)
+      emit('tool_status', { state, tool_name: toolName, call_id: toolUseId ?? null, display })
       return Response.json({ status: 'delivered' })
     }
 
@@ -793,14 +857,40 @@ Bun.serve({
       const p = active
       if (!p) {
         log(`stop NO-MATCH no-active session=${body?.session_id ?? '(unknown)'}`)
+        emit('stop_no_match', { session_id: body?.session_id ?? null, text_len: text.length }, 'warn')
         return Response.json({ status: 'ignored', reason: 'no_active_chat' })
       }
 
       const responseText = await withUpdateNotice(text)
       active = null
       clearTimeout(p.timer)
+      emit('stop_ok', { text_len: text.length })
       p.resolve({ text: responseText, sources: [], debug: null })
       return Response.json({ status: 'delivered' })
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/session-context') {
+      if (!connection) {
+        return Response.json({ error: 'not connected' }, { status: 401 })
+      }
+
+      let body: AgentSessionBootstrap
+      try {
+        body = await req.json()
+      } catch {
+        log('http /api/session-context invalid json')
+        return Response.json({ error: 'invalid json' }, { status: 400 })
+      }
+
+      persistSessionBootstrap(body)
+      log(`session-context OK reason=${body.bootstrap_reason ?? '(none)'} session=${body.session_id ?? '(none)'}`)
+      emit('session_context', {
+        reason: body.bootstrap_reason ?? null,
+        session_id: body.session_id ?? null,
+        message_count: Array.isArray(body.messages) ? body.messages.length : 0,
+        memory_count: Array.isArray(body.recent_memories) ? body.recent_memories.length : 0,
+      })
+      return Response.json({ status: 'stored' })
     }
 
     // Reattach a fresh SSE stream to an existing chat session.
@@ -830,7 +920,7 @@ Bun.serve({
     if (req.method === 'POST' && url.pathname === '/api/chat') {
       // A new chat supersedes any in-flight one (the model can only answer one at a time)
       closeActive('superseded')
-      let body: any
+      let body: AgentSessionBootstrap
       try {
         body = await req.json()
       } catch {
@@ -838,40 +928,35 @@ Bun.serve({
         return new Response('invalid json', { status: 400 })
       }
 
-      const messages: Array<{ speaker?: number; content?: string; text?: string }> =
-        body?.messages ?? []
+      persistSessionBootstrap({ ...body, bootstrap_reason: body.bootstrap_reason ?? 'chat' })
+
+      const messages = body.messages ?? []
       const last = messages[messages.length - 1]
-      const userText = (last?.content ?? last?.text ?? '').toString()
+      const userText = (last?.content ?? last?.text ?? '').toString().trim()
       if (!userText) {
         log('http /api/chat empty content', body)
         return Response.json({ error: { message: 'no message content' } }, { status: 400 })
       }
 
-      const meta: Record<string, string> = {}
-      if (typeof body?.user_local_time === 'string') meta.user_local_time = body.user_local_time
-      if (typeof body?.user_timezone === 'string') meta.user_timezone = body.user_timezone
-      const firstName = typeof body?.first_name === 'string' ? body.first_name.trim() : ''
-      const lastName = typeof body?.last_name === 'string' ? body.last_name.trim() : ''
-      if (firstName) meta.user_first_name = firstName
-      if (lastName) meta.user_last_name = lastName
-
-      const loc = body?.location
-      if (loc && typeof loc === 'object') {
-        if (typeof loc.latitude === 'number') meta.user_latitude = String(loc.latitude)
-        if (typeof loc.longitude === 'number') meta.user_longitude = String(loc.longitude)
-        if (typeof loc.address === 'string' && loc.address.trim()) meta.user_address = loc.address
-      }
-
+      const channelContent = buildChannelContent(body)
+      const meta = buildChannelMeta(body)
+      const loc = body.location
 
       const { entry, response } = openPendingChat()
+      emit('chat_in', {
+        text_len: userText.length,
+        has_location: !!(loc && typeof loc === 'object'),
+        has_user_name: !!((body.first_name ?? '').trim() || (body.last_name ?? '').trim()),
+        transcript_messages: Math.max(0, messages.length - 1),
+      })
       try {
-        const channelParams = { content: userText, meta };
-        log('mcp notify: sending params:', channelParams);
+        const channelParams = { content: channelContent, meta }
+        log('mcp notify: sending params:', channelParams)
         await mcp.notification({
           method: 'notifications/claude/channel',
           params: channelParams,
-        });
-        log('mcp notify ✓');
+        })
+        log('mcp notify ✓')
    
 
         return new Response(responseToSse(entry, response), {
@@ -880,6 +965,7 @@ Bun.serve({
       } catch (err) {
         cancelPendingChat(entry)
         log(`chat failed err=${(err as Error).stack ?? (err as Error).message}`)
+        emit('error', { stage: 'chat_notify', message: (err as Error).message }, 'error')
         return Response.json({ error: { message: 'failed to send message to Claude' } }, { status: 500 })
       }
     }
@@ -896,17 +982,21 @@ void currentUpdateState().catch((err) => {
 
 // Provision the persistent Cloudflare tunnel on boot.
 const device = getOrCreateDevice()
+events.setDeviceId(device.device_id)
 log(`device id=${device.device_id} label=${device.device_label}`)
+emit('device', { device_id: device.device_id, device_label: device.device_label })
 void openProvisionedTunnel({
   deviceId: device.device_id,
   deviceLabel: device.device_label,
   backendBaseUrl: TUNNEL_BACKEND_URL,
   log,
+  emit,
 })
   .then(async () => {
     const url = getTunnelUrl()
     const err = getTunnelError()
     if (url) {
+      emit('tunnel_ready', { url })
       const state = await currentUpdateState().catch(() => updateState)
       if (canShowTunnelUrl(state)) {
         try {
@@ -922,6 +1012,7 @@ void openProvisionedTunnel({
         }
       }
     } else if (err) {
+      emit('tunnel_error', { error: err }, 'error')
       try {
         await mcp.notification({
           method: 'notifications/claude/channel',
@@ -933,6 +1024,7 @@ void openProvisionedTunnel({
   .catch(async (err) => {
     const msg = (err as Error).message
     log(`tunnel open failed: ${msg}`)
+    emit('tunnel_error', { error: msg }, 'error')
     try {
       await mcp.notification({
         method: 'notifications/claude/channel',
