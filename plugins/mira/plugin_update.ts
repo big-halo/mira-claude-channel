@@ -19,8 +19,11 @@ export type AutoUpdateResult = { ok: true } | { ok: false; reason: string }
 
 export function autoUpdatePlugin(): AutoUpdateResult {
   try {
+    const claudeBin =
+      process.env.CLAUDE_BIN ??
+      `${process.env.HOME}/.local/bin/claude`
     const result = Bun.spawnSync(
-      ['claude', 'plugin', 'update', `${PLUGIN_NAME}@${MARKETPLACE_NAME}`],
+      [claudeBin, 'plugin', 'update', `${PLUGIN_NAME}@${MARKETPLACE_NAME}`],
       { stdout: 'pipe', stderr: 'pipe' },
     )
     if (result.exitCode === 0) return { ok: true }
