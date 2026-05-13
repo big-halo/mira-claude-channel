@@ -3,7 +3,7 @@ import { join } from 'path'
 const MARKETPLACE_NAME = 'mira-marketplace'
 const PLUGIN_NAME = 'mira'
 const REMOTE_PACKAGE_URL =
-  'https://raw.githubusercontent.com/maxawad/mira-channel-test/main/plugins/mira/package.json'
+  'https://raw.githubusercontent.com/maxawad/mira-channel-test/main/plugins/mira/package.json?no-cache'
 const DEFAULT_UPDATE_CHECK_TIMEOUT_MS = 3_000
 
 export const UPDATE_NOTICE =
@@ -54,12 +54,18 @@ export const CHANNELS_REQUIRED_MESSAGE =
   '(or use the `mira` alias if you have it :)'
 
 function localPluginVersion(pluginRoot: string): string | null {
-  try {
-    const pkg = JSON.parse(Bun.file(join(pluginRoot, 'package.json')).textSync())
-    return typeof pkg.version === 'string' ? pkg.version : null
-  } catch {
-    return null
+  // server.ts lives at plugin root; hooks live one level deeper in hooks/
+  const candidates = [
+    join(pluginRoot, 'package.json'),
+    join(pluginRoot, '..', 'package.json'),
+  ]
+  for (const p of candidates) {
+    try {
+      const pkg = JSON.parse(Bun.file(p).textSync())
+      if (typeof pkg.version === 'string') return pkg.version
+    } catch { /* try next */ }
   }
+  return null
 }
 
 async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {

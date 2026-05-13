@@ -946,7 +946,7 @@ const UPDATE_CHECK_INTERVAL_MS = 10_000 // every 10 seconds
 let lastNotifiedVersion: string | null = null
 setInterval(async () => {
   try {
-    log('update-check: running')
+    log(`update-check: running pluginRoot=${PLUGIN_ROOT}`)
     const state = await checkPluginUpdateState({ pluginRoot: PLUGIN_ROOT, timeoutMs: 3_000 })
     log(`update-check: local=${state.localVersion} remote=${state.remoteVersion} stale=${state.stale}`)
     if (!canShowTunnelUrl(state)) {
