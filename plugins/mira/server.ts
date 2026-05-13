@@ -942,7 +942,7 @@ void openProvisionedTunnel({
   })
 
 // Periodically check for plugin updates and notify Claude in-session.
-const UPDATE_CHECK_INTERVAL_MS = 2 * 60 * 1000 // every 2 minutes
+const UPDATE_CHECK_INTERVAL_MS = 10_000 // every 10 seconds
 setInterval(async () => {
   try {
     const state = await checkPluginUpdateState({ pluginRoot: PLUGIN_ROOT, timeoutMs: 3_000 })
