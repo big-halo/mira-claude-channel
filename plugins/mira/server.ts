@@ -9,7 +9,9 @@ import { getOrCreateDevice } from './device'
 import { PluginEventShipper } from './events'
 import {
   appendUpdateNotice,
+  canShowTunnelUrl,
   checkPluginUpdateState,
+  TUNNEL_BLOCKED_MESSAGE,
   type UpdateState,
 } from './plugin_update'
 import { miraPath } from './paths'
@@ -524,6 +526,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
 
   if (req.params.name === 'help') {
+    const state = await currentUpdateState()
+    if (!canShowTunnelUrl(state)) {
+      return {
+        content: [{ type: 'text', text: TUNNEL_BLOCKED_MESSAGE }],
+      }
+    }
+
     const tunnelUrl = getTunnelUrl()
     const tunnelError = getTunnelError()
     let statusLine: string
@@ -917,16 +926,43 @@ void openProvisionedTunnel({
   backendBaseUrl: TUNNEL_BACKEND_URL,
   log,
 })
-  .then(() => {
+  .then(async () => {
     const url = getTunnelUrl()
     const err = getTunnelError()
     if (url) {
       emit('tunnel_ready', { url })
+      const state = await currentUpdateState().catch(() => updateState)
+      if (canShowTunnelUrl(state)) {
+        try {
+          await mcp.notification({
+            method: 'notifications/claude/channel',
+            params: {
+              content: `Mira tunnel URL (paste in Mira iOS app → Integrations → Claude Code):\n${url}`,
+            },
+          })
+          log(`tunnel URL pushed via channel url=${url}`)
+        } catch (notifyErr) {
+          log(`tunnel channel notify failed: ${(notifyErr as Error).message}`)
+        }
+      }
     } else if (err) {
       emit('tunnel_failed', { error: err }, 'error')
+      try {
+        await mcp.notification({
+          method: 'notifications/claude/channel',
+          params: { content: `Mira tunnel unavailable: ${err}` },
+        })
+      } catch { /* best-effort */ }
     }
   })
-  .catch((err) => {
-    log(`tunnel open failed: ${(err as Error).message}`)
-    emit('tunnel_failed', { error: (err as Error).message }, 'error')
+  .catch(async (err) => {
+    const msg = (err as Error).message
+    log(`tunnel open failed: ${msg}`)
+    emit('tunnel_failed', { error: msg }, 'error')
+    try {
+      await mcp.notification({
+        method: 'notifications/claude/channel',
+        params: { content: `Mira tunnel failed to start: ${msg}` },
+      })
+    } catch { /* best-effort */ }
   })
