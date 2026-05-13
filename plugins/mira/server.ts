@@ -189,7 +189,6 @@ async function syncConversationsToMarkdown() {
 }
 
 log(`boot pid=${process.pid} port=${PORT} log=${LOG_FILE}`)
-emit('boot', { pid: process.pid, port: PORT, log_file: LOG_FILE })
 
 type BufferedEvent = { id: number; payload: string }
 
@@ -257,7 +256,6 @@ function closeActive(reason: ChatCloseReason) {
   if (!p) return
   active = null
   clearTimeout(p.timer)
-  emit(reason === 'timeout' ? 'chat_timeout' : 'chat_superseded', { reason }, reason === 'timeout' ? 'warn' : 'info')
   p.reject(new ChatClosedError(reason))
 }
 
@@ -360,7 +358,7 @@ async function runStreamLifecycle(
       broadcast(p, { text: payload.text })
       broadcast(p, { sources: payload.sources })
       emitDone(p)
-      emit('chat_done', { text_len: payload.text.length, sources: (payload.sources as unknown[]).length })
+      emit('chat_done', { text_len: payload.text.length })
     }
   } catch (err) {
     const message = err instanceof ChatClosedError ? err.reason : 'failed'
@@ -368,7 +366,6 @@ async function runStreamLifecycle(
       broadcast(p, { error: message })
     }
     if (!(err instanceof ChatClosedError)) {
-      emit('error', { stage: 'chat_sse', message: (err as Error).message ?? String(err) }, 'error')
     }
     scheduleSessionCleanup(p)
   } finally {
@@ -509,7 +506,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     const p = active
     if (!p) {
       log(`status_update DROPPED no active chat text=${JSON.stringify(text.slice(0, 120))}`)
-      emit('status_update_dropped', {}, 'warn')
       return {
         content: [
           { type: 'text', text: 'No active Mira chat — status not delivered.' },
@@ -520,7 +516,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     const displayText = text.endsWith('...') ? text : `${text}...`
     broadcast(p, { status_update: { text: displayText } })
     log(`status_update OK text=${JSON.stringify(text.slice(0, 120))}`)
-    emit('status_update', {})
     return {
       content: [
         { type: 'text', text: 'Status delivered to Mira. Continue working on the final answer.' },
@@ -575,7 +570,6 @@ const PermissionRequestSchema = z.object({
 mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
   const { request_id, tool_name, description, input_preview } = params
   log(`permission_request request_id=${request_id} tool=${tool_name}`)
-  emit('permission_request', { request_id, tool_name, description: description.slice(0, 200) })
   const p = active
   if (!p) {
     log(`permission_request DROPPED no active chat (local terminal will handle)`)
@@ -639,7 +633,6 @@ log('mcp stdio connected')
 // alive forever after stdio closes.
 const shutdown = (reason: string) => {
   log(`shutdown reason=${reason}`)
-  emit('shutdown', { reason })
   void events.flush().finally(() => {
     events.stop()
     process.exit(0)
@@ -712,7 +705,7 @@ Bun.serve({
       })
 
       log(`connect OK user_id=${userId} backend=${backendBaseUrl} token_len=${accessToken.length}`)
-      emit('connect', { user_id: userId, backend_base_url: backendBaseUrl, token_len: accessToken.length })
+      emit('connect', { user_id: userId })
       return Response.json({
         status: 'connected',
         user_id: userId,
@@ -736,7 +729,6 @@ Bun.serve({
       const userId = connection?.userId
       connection = null
       log(`disconnect was_connected=${wasConnected} user_id=${userId ?? '(none)'}`)
-      emit('disconnect', { was_connected: wasConnected, user_id: userId ?? null })
       void events.flush().finally(() => events.setConnection(null))
       return Response.json({ status: 'disconnected' })
     }
@@ -793,7 +785,7 @@ Bun.serve({
       }
       broadcast(p, { tool_status: payload })
       log(`tool_status ${state} tool=${toolName} call_id=${toolUseId ?? '(none)'} display=${JSON.stringify(display)}`)
-      emit('tool_status', { state, tool_name: toolName, call_id: toolUseId ?? null, display })
+      if (state === 'started') emit('tool_call', { tool_name: toolName })
       return Response.json({ status: 'delivered' })
     }
 
@@ -815,14 +807,12 @@ Bun.serve({
       const p = active
       if (!p) {
         log(`stop NO-MATCH no-active session=${body?.session_id ?? '(unknown)'}`)
-        emit('stop_no_match', { session_id: body?.session_id ?? null, text_len: text.length }, 'warn')
         return Response.json({ status: 'ignored', reason: 'no_active_chat' })
       }
 
       const responseText = await withUpdateNotice(text)
       active = null
       clearTimeout(p.timer)
-      emit('stop_ok', { text_len: text.length })
       p.resolve({ text: responseText, sources: [], debug: null })
       return Response.json({ status: 'delivered' })
     }
@@ -888,11 +878,7 @@ Bun.serve({
 
 
       const { entry, response } = openPendingChat()
-      emit('chat_in', {
-        text_len: userText.length,
-        has_location: !!(loc && typeof loc === 'object'),
-        has_user_name: !!((body.first_name ?? '').trim() || (body.last_name ?? '').trim()),
-      })
+      emit('chat_in', { text_len: userText.length })
       try {
         const channelParams = { content: userText, meta }
         log('mcp notify: sending params:', channelParams)
@@ -908,7 +894,6 @@ Bun.serve({
       } catch (err) {
         cancelPendingChat(entry)
         log(`chat failed err=${(err as Error).message}`)
-        emit('error', { stage: 'chat_notify', message: (err as Error).message }, 'error')
         return Response.json({ error: { message: 'failed to send message to Claude' } }, { status: 500 })
       }
     }
@@ -925,15 +910,12 @@ void currentUpdateState().catch((err) => {
 
 // Provision the persistent Cloudflare tunnel on boot.
 const device = getOrCreateDevice()
-events.setDeviceId(device.device_id)
 log(`device id=${device.device_id} label=${device.device_label}`)
-emit('device', { device_id: device.device_id, device_label: device.device_label })
 void openProvisionedTunnel({
   deviceId: device.device_id,
   deviceLabel: device.device_label,
   backendBaseUrl: TUNNEL_BACKEND_URL,
   log,
-  emit,
 })
   .then(() => {
     const url = getTunnelUrl()
@@ -941,10 +923,10 @@ void openProvisionedTunnel({
     if (url) {
       emit('tunnel_ready', { url })
     } else if (err) {
-      emit('tunnel_error', { error: err }, 'error')
+      emit('tunnel_failed', { error: err }, 'error')
     }
   })
   .catch((err) => {
     log(`tunnel open failed: ${(err as Error).message}`)
-    emit('tunnel_error', { error: (err as Error).message }, 'error')
+    emit('tunnel_failed', { error: (err as Error).message }, 'error')
   })
