@@ -69,7 +69,7 @@ try {
   }
 } catch {
   systemMessage = channelsActive
-    ? 'Mira tunnel warming up — URL on its way…'
+    ? 'Mira is live — glasses connected, tunnel coming in hot 🔥'
     : CHANNELS_REQUIRED_MESSAGE
 }
 
