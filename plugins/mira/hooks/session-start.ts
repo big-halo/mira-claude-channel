@@ -16,9 +16,10 @@ import {
   checkPluginUpdateState,
   TUNNEL_BLOCKED_MESSAGE,
 } from '../plugin_update'
+import { miraPath } from '../paths'
 
-const URL_FILE = `${process.env.HOME}/.mira-mcp/tunnel.url`
-const ERROR_FILE = `${process.env.HOME}/.mira-mcp/tunnel.error`
+const URL_FILE = miraPath('tunnel.url')
+const ERROR_FILE = miraPath('tunnel.error')
 const AGENT_FILE = join(import.meta.dir, '..', 'agents', 'mira.md')
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT ?? join(import.meta.dir, '..')
 

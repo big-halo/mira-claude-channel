@@ -15,6 +15,7 @@ import {
   type UpdateState,
 } from './plugin_update'
 import { PluginEventShipper } from './events'
+import { miraPath } from './paths'
 import { join } from 'path'
 import { homedir } from 'os'
 
@@ -27,7 +28,7 @@ const TUNNEL_BACKEND_URL = 'https://glass-staging.thebighalo.com'
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT ?? import.meta.dir
 const UPDATE_CHECK_TTL_MS = 5 * 60_000
 
-const LOG_FILE = process.env.MIRA_LOG ?? '/tmp/mira.log'
+const LOG_FILE = process.env.MIRA_LOG ?? miraPath('mira.log')
 function log(msg: string, extra?: unknown) {
   const line =
     `[${new Date().toISOString()}] ${msg}` +
@@ -36,6 +37,7 @@ function log(msg: string, extra?: unknown) {
   // stderr also goes to Claude Code's debug log when run with --debug
   process.stderr.write(line)
   try {
+    mkdirSync(miraPath(), { recursive: true })
     appendFileSync(LOG_FILE, line)
   } catch {
     // best-effort; never crash on logging

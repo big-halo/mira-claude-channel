@@ -1,10 +1,14 @@
 import { mkdirSync, writeFileSync, unlinkSync } from 'fs'
+import { miraPath } from './paths'
 
-const CLOUDFLARED_DIR = `${process.env.HOME}/.mira-mcp`
-const CLOUDFLARED_PATH = `${CLOUDFLARED_DIR}/cloudflared`
+const CLOUDFLARED_DIR = miraPath()
+const CLOUDFLARED_PATH = process.platform === 'win32'
+  ? `${CLOUDFLARED_DIR}/cloudflared.exe`
+  : `${CLOUDFLARED_DIR}/cloudflared`
 // Persisted on disk so the SessionStart hook can read the current tunnel URL
 // without talking to the MCP server.
 const TUNNEL_URL_FILE = `${CLOUDFLARED_DIR}/tunnel.url`
+const TUNNEL_ERROR_FILE = `${CLOUDFLARED_DIR}/tunnel.error`
 const CLOUDFLARED_READY_TIMEOUT_MS = 30_000
 const CLOUDFLARED_LOG_TAIL_SIZE = 8
 
@@ -13,6 +17,17 @@ let tunnelError: string | null = null
 
 export const getTunnelUrl = () => tunnelUrl
 export const getTunnelError = () => tunnelError
+
+function clearTunnelErrorFile(log: (msg: string) => void) {
+  try {
+    unlinkSync(TUNNEL_ERROR_FILE)
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code && code !== 'ENOENT') {
+      log(`tunnel.error unlink failed: ${(err as Error).message}`)
+    }
+  }
+}
 
 function clearTunnelUrlFile(log: (msg: string) => void) {
   try {
@@ -34,6 +49,22 @@ function writeTunnelUrlFile(url: string, log: (msg: string) => void) {
   }
 }
 
+function setTunnelError(message: string, log: (msg: string) => void) {
+  tunnelError = message
+  try {
+    mkdirSync(CLOUDFLARED_DIR, { recursive: true })
+    writeFileSync(TUNNEL_ERROR_FILE, message)
+  } catch (err) {
+    log(`tunnel.error write failed: ${(err as Error).message}`)
+  }
+}
+
+async function downloadFile(url: string, path: string) {
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`download failed status=${res.status}`)
+  await Bun.write(path, await res.arrayBuffer())
+}
+
 function cloudflaredReady(line: string): boolean {
   return /Registered tunnel connection/i.test(line) ||
     /connection .* registered/i.test(line)
@@ -52,15 +83,19 @@ function summarizeTail(lines: string[]): string {
 async function ensureCloudflared(log: (msg: string) => void): Promise<string> {
   if (await Bun.file(CLOUDFLARED_PATH).exists()) return CLOUDFLARED_PATH
   log('downloading cloudflared (first run)...')
+  mkdirSync(CLOUDFLARED_DIR, { recursive: true })
+
   const arch = process.arch === 'arm64' ? 'arm64' : 'amd64'
-  const os = process.platform === 'darwin' ? 'darwin' : 'linux'
-  const ext = os === 'darwin' ? '.tgz' : ''
-  const url = `https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-${os}-${arch}${ext}`
-  await Bun.spawn(['mkdir', '-p', CLOUDFLARED_DIR]).exited
-  if (os === 'darwin') {
+  if (process.platform === 'win32') {
+    const url = `https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-${arch}.exe`
+    await downloadFile(url, CLOUDFLARED_PATH)
+  } else if (process.platform === 'darwin') {
+    const url = `https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-${arch}.tgz`
     await Bun.spawn(['sh', '-c', `curl -sL ${url} | tar xz -C ${CLOUDFLARED_DIR}`]).exited
   } else {
-    await Bun.spawn(['sh', '-c', `curl -sL ${url} -o ${CLOUDFLARED_PATH} && chmod +x ${CLOUDFLARED_PATH}`]).exited
+    const url = `https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}`
+    await downloadFile(url, CLOUDFLARED_PATH)
+    await Bun.spawn(['chmod', '+x', CLOUDFLARED_PATH]).exited
   }
   log('cloudflared downloaded')
   return CLOUDFLARED_PATH
@@ -132,6 +167,7 @@ async function fetchProvisionedTunnel(opts: ProvisionOptions): Promise<Provision
 
 export async function openProvisionedTunnel(opts: ProvisionOptions): Promise<void> {
   clearTunnelUrlFile(opts.log)
+  clearTunnelErrorFile(opts.log)
 
   const provisioned = await fetchProvisionedTunnel(opts)
   if (provisioned) {
@@ -139,7 +175,7 @@ export async function openProvisionedTunnel(opts: ProvisionOptions): Promise<voi
   }
 
   if (!provisioned) {
-    tunnelError = 'Could not provision tunnel from backend. Reconnect to retry.'
+    setTunnelError('Could not provision tunnel from backend. Reconnect to retry.', opts.log)
     emitTunnelEvent(opts, 'tunnel_unavailable', { stage: 'provision', error: tunnelError }, 'error')
     return
   }
@@ -148,7 +184,7 @@ export async function openProvisionedTunnel(opts: ProvisionOptions): Promise<voi
   try {
     binary = await ensureCloudflared(opts.log)
   } catch (err) {
-    tunnelError = `Cloudflared setup failed: ${(err as Error).message}`
+    setTunnelError(`Cloudflared setup failed: ${(err as Error).message}`, opts.log)
     opts.log(`cloudflared setup failed: ${(err as Error).message}`)
     emitTunnelEvent(
       opts,
@@ -170,7 +206,10 @@ export async function openProvisionedTunnel(opts: ProvisionOptions): Promise<voi
   })
   const readyTimer = setTimeout(() => {
     if (ready) return
-    tunnelError = `Cloudflared did not confirm a tunnel connection within ${CLOUDFLARED_READY_TIMEOUT_MS / 1000}s. Restart Claude Code to retry.`
+    setTunnelError(
+      `Cloudflared did not confirm a tunnel connection within ${CLOUDFLARED_READY_TIMEOUT_MS / 1000}s. Restart Claude Code to retry.`,
+      opts.log,
+    )
     if (logTail.length) tunnelError += ` Last log: ${summarizeTail(logTail)}`
     opts.log(`cloudflared ready timeout hostname=${provisioned.hostname} tail=${summarizeTail(logTail)}`)
     emitTunnelEvent(
@@ -204,7 +243,10 @@ export async function openProvisionedTunnel(opts: ProvisionOptions): Promise<voi
           tunnelUrl = null
           clearTunnelUrlFile(opts.log)
           if (!ready) {
-            tunnelError = `Cloudflared exited before the tunnel was ready (code ${code}). Restart Claude Code to retry.`
+            setTunnelError(
+              `Cloudflared exited before the tunnel was ready (code ${code}). Restart Claude Code to retry.`,
+              opts.log,
+            )
             if (logTail.length) tunnelError += ` Last log: ${summarizeTail(logTail)}`
             emitTunnelEvent(
               opts,
@@ -233,7 +275,7 @@ export async function openProvisionedTunnel(opts: ProvisionOptions): Promise<voi
     )
   } catch (err) {
     clearTimeout(readyTimer)
-    tunnelError = `Cloudflared failed to start: ${(err as Error).message}`
+    setTunnelError(`Cloudflared failed to start: ${(err as Error).message}`, opts.log)
     opts.log(`cloudflared spawn failed: ${(err as Error).message}`)
     emitTunnelEvent(
       opts,
@@ -281,6 +323,7 @@ export async function openProvisionedTunnel(opts: ProvisionOptions): Promise<voi
 
   tunnelUrl = url
   tunnelError = null
+  clearTunnelErrorFile(opts.log)
   writeTunnelUrlFile(url, opts.log)
   opts.log(`tunnel ready hostname=${provisioned.hostname}`)
 
