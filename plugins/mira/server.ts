@@ -941,12 +941,15 @@ void openProvisionedTunnel({
     } catch { /* best-effort */ }
   })
 
-// Periodically check for plugin updates and notify Claude in-session.
+// Periodically check for plugin updates and notify Claude in-session (once per stale version).
 const UPDATE_CHECK_INTERVAL_MS = 10_000 // every 10 seconds
+let lastNotifiedVersion: string | null = null
 setInterval(async () => {
   try {
     const state = await checkPluginUpdateState({ pluginRoot: PLUGIN_ROOT, timeoutMs: 3_000 })
     if (!canShowTunnelUrl(state)) {
+      if (lastNotifiedVersion === state.localVersion) return // already notified for this version
+      lastNotifiedVersion = state.localVersion
       log('plugin is stale, attempting background auto-update')
       const result = autoUpdatePlugin()
       if (result.ok) {
