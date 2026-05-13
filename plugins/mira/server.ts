@@ -136,7 +136,7 @@ async function syncConversationsToMarkdown() {
   const listRes = await backendGet('/messages/list')
   if (!listRes.ok) {
     const body = await listRes.text().catch(() => '')
-    log(`conversation sync backend error status=${listRes.status} body=${body.slice(0, 200)}`)
+    log(`conversation sync backend error status=${listRes.status} body=${body}`)
     return
   }
   const data = (await listRes.json()) as { sessions: BackendSession[] }
@@ -153,7 +153,7 @@ async function syncConversationsToMarkdown() {
     )
     if (!detailRes.ok) {
       const body = await detailRes.text().catch(() => '')
-      log(`session sync failed id=${session.id} status=${detailRes.status} body=${body.slice(0, 200)}`)
+      log(`session sync failed id=${session.id} status=${detailRes.status} body=${body}`)
       continue
     }
     const detail = (await detailRes.json()) as BackendSessionDetail
@@ -680,7 +680,7 @@ Bun.serve({
       }
 
       void syncConversationsToMarkdown().catch((err) => {
-        log(`conversation sync failed: ${(err as Error).message}`)
+        log(`conversation sync failed: ${(err as Error).stack ?? (err as Error).message}`)
       })
 
       log(`connect OK user_id=${userId} backend=${backendBaseUrl} token_len=${accessToken.length}`)
@@ -869,7 +869,7 @@ Bun.serve({
         })
       } catch (err) {
         cancelPendingChat(entry)
-        log(`chat failed err=${(err as Error).message}`)
+        log(`chat failed err=${(err as Error).stack ?? (err as Error).message}`)
         return Response.json({ error: { message: 'failed to send message to Claude' } }, { status: 500 })
       }
     }
@@ -892,4 +892,4 @@ void openProvisionedTunnel({
   deviceLabel: device.device_label,
   backendBaseUrl: TUNNEL_BACKEND_URL,
   log,
-}).catch((err) => log(`tunnel open failed: ${(err as Error).message}`))
+}).catch((err) => log(`tunnel open failed: ${(err as Error).stack ?? (err as Error).message}`))

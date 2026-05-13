@@ -70,7 +70,7 @@ async function fetchProvisionedTunnel(opts: ProvisionOptions): Promise<Provision
     })
     if (!res.ok) {
       const body = await res.text().catch(() => '')
-      opts.log(`tunnel provision failed status=${res.status} body=${body.slice(0, 200)}`)
+      opts.log(`tunnel provision failed status=${res.status} body=${body}`)
       return null
     }
     const data = (await res.json()) as ProvisionResponse
@@ -80,7 +80,7 @@ async function fetchProvisionedTunnel(opts: ProvisionOptions): Promise<Provision
     }
     return data
   } catch (err) {
-    opts.log(`tunnel provision error: ${(err as Error).message}`)
+    opts.log(`tunnel provision error: ${(err as Error).stack ?? (err as Error).message}`)
     return null
   }
 }
