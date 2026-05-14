@@ -657,6 +657,10 @@ Bun.serve({
       req = new Request(req, { body: raw })
     }
 
+    if (req.method === 'GET' && url.pathname === '/') {
+      return Response.json({ status: 'Server up. Enter the URL into the Mira App under the Claude Code integration', active: active !== null })
+    }
+    
     if (req.method === 'GET' && url.pathname === '/health') {
       return Response.json({ status: 'ok', active: active !== null })
     }
