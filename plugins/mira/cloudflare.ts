@@ -1,3 +1,5 @@
+import { homedir } from 'os'
+import { join } from 'path'
 
 const CLOUDFLARED_MISSING_MESSAGE =
   'cloudflared not found on PATH. Install it with `brew install cloudflared` (macOS) ' +
@@ -12,11 +14,10 @@ export const getTunnelError = () => tunnelError
 function findCloudflared(): string | null {
   // Prefer a vendored copy at ~/.mira-mcp/cloudflared(.exe) — useful on Windows
   // where users typically don't have cloudflared on PATH.
-  const home = process.env.HOME ?? process.env.USERPROFILE ?? '.'
   const vendored =
     process.platform === 'win32'
-      ? `${home}\\.mira-mcp\\cloudflared.exe`
-      : `${home}/.mira-mcp/cloudflared`
+      ? join(homedir(), '.mira-mcp', 'cloudflared.exe')
+      : join(homedir(), '.mira-mcp', 'cloudflared')
   if (Bun.spawnSync([vendored, '--version']).exitCode === 0) return vendored
 
   const lookup = process.platform === 'win32' ? 'where' : 'which'
