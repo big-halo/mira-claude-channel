@@ -1,9 +1,6 @@
 import { homedir } from 'os'
 import { join } from 'path'
-
-const CLOUDFLARED_MISSING_MESSAGE =
-  'cloudflared not found on PATH. Install it with `brew install cloudflared` (macOS) ' +
-  'or see https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/, then reconnect.'
+import { mkdirSync } from 'fs'
 
 let tunnelUrl: string | null = null
 let tunnelError: string | null = null
@@ -11,20 +8,53 @@ let tunnelError: string | null = null
 export const getTunnelUrl = () => tunnelUrl
 export const getTunnelError = () => tunnelError
 
-function findCloudflared(): string | null {
-  // Prefer a vendored copy at ~/.mira-mcp/cloudflared(.exe) — useful on Windows
-  // where users typically don't have cloudflared on PATH.
-  const vendored =
-    process.platform === 'win32'
-      ? join(homedir(), '.mira-mcp', 'cloudflared.exe')
-      : join(homedir(), '.mira-mcp', 'cloudflared')
-  if (Bun.spawnSync([vendored, '--version']).exitCode === 0) return vendored
+const MIRA_MCP_DIR = join(homedir(), '.mira-mcp')
+const CLOUDFLARED_BIN =
+  process.platform === 'win32'
+    ? join(MIRA_MCP_DIR, 'cloudflared.exe')
+    : join(MIRA_MCP_DIR, 'cloudflared')
 
+async function ensureCloudflared(log: (msg: string) => void): Promise<string | null> {
+  // Already downloaded
+  if (Bun.spawnSync([CLOUDFLARED_BIN, '--version']).exitCode === 0) return CLOUDFLARED_BIN
+
+  // Fall back to system PATH
   const lookup = process.platform === 'win32' ? 'where' : 'which'
-  const result = Bun.spawnSync([lookup, 'cloudflared'])
-  if (result.exitCode !== 0) return null
-  const path = new TextDecoder().decode(result.stdout).trim().split(/\r?\n/)[0]
-  return path || null
+  const onPath = new TextDecoder()
+    .decode(Bun.spawnSync([lookup, 'cloudflared']).stdout)
+    .trim()
+    .split(/\r?\n/)[0]
+  if (onPath) return onPath
+
+  // Auto-download via fetch (no sh/curl — works on Windows too)
+  log('cloudflared not found, downloading...')
+  const arch = process.arch === 'arm64' ? 'arm64' : 'amd64'
+  const url =
+    process.platform === 'win32'
+      ? `https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-${arch}.exe`
+      : process.platform === 'darwin'
+        ? `https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-${arch}.tgz`
+        : `https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}`
+  try {
+    mkdirSync(MIRA_MCP_DIR, { recursive: true })
+    const res = await fetch(url)
+    if (!res.ok) throw new Error(`download status=${res.status}`)
+    if (process.platform === 'darwin') {
+      // tgz — extract in place
+      const buf = await res.arrayBuffer()
+      const tmp = CLOUDFLARED_BIN + '.tgz'
+      await Bun.write(tmp, buf)
+      Bun.spawnSync(['tar', 'xz', '-C', MIRA_MCP_DIR, '-f', tmp])
+    } else {
+      await Bun.write(CLOUDFLARED_BIN, await res.arrayBuffer())
+      if (process.platform !== 'win32') Bun.spawnSync(['chmod', '+x', CLOUDFLARED_BIN])
+    }
+    log(`cloudflared downloaded to ${CLOUDFLARED_BIN}`)
+    return CLOUDFLARED_BIN
+  } catch (err) {
+    log(`cloudflared download failed: ${(err as Error).message}`)
+    return null
+  }
 }
 
 type ProvisionResponse = { hostname: string; token: string }
@@ -74,10 +104,9 @@ export async function openProvisionedTunnel(opts: ProvisionOptions): Promise<voi
     return
   }
 
-  const binary = findCloudflared()
+  const binary = await ensureCloudflared(opts.log)
   if (!binary) {
-    opts.log('cloudflared not found on PATH')
-    tunnelError = CLOUDFLARED_MISSING_MESSAGE
+    tunnelError = 'cloudflared could not be found or downloaded. See https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/'
     return
   }
   opts.log(`cloudflared found at ${binary}`)

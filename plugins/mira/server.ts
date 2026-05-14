@@ -174,6 +174,24 @@ async function syncConversationsToMarkdown() {
   log(`conversation sync OK user_id=${connection.userId} sessions=${sessions.length}`)
 }
 
+// Kill any previous server instance that may still own the port.
+const PID_FILE = join(homedir(), '.mira-mcp', 'server.pid')
+try {
+  const prev = parseInt((await Bun.file(PID_FILE).text().catch(() => '')).trim())
+  if (prev && prev !== process.pid) {
+    try {
+      // On Windows SIGTERM isn't supported — use the default signal (SIGTERM on Unix, terminate on Windows)
+      process.kill(prev)
+      log(`killed previous server pid=${prev}`)
+      await Bun.sleep(300)
+    } catch { /* already gone */ }
+  }
+} catch { /* no pid file yet */ }
+try {
+  mkdirSync(join(homedir(), '.mira-mcp'), { recursive: true })
+  writeFileSync(PID_FILE, String(process.pid))
+} catch { /* best-effort */ }
+
 log(`boot pid=${process.pid} port=${PORT}`)
 
 type BufferedEvent = { id: number; payload: string }
@@ -619,6 +637,7 @@ log('mcp stdio connected')
 // alive forever after stdio closes.
 const shutdown = (reason: string) => {
   log(`shutdown reason=${reason}`)
+  try { writeFileSync(PID_FILE, '') } catch { /* best-effort */ }
   process.exit(0)
 }
 process.stdin.on('end', () => shutdown('stdin end'))
