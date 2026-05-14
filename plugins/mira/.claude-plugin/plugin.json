@@ -3,10 +3,10 @@
   "description": "Bridges chat from the Mira iOS app into Claude Code",
   "mcpServers": {
     "mira": {
-      "command": "sh",
+      "command": "bun",
       "args": [
-        "-lc",
-        "cd \"${CLAUDE_PLUGIN_ROOT}\" && { [ -d node_modules ] || bun install --silent >>/tmp/mira.log 2>&1; }; exec bun \"${CLAUDE_PLUGIN_ROOT}/server.ts\" 2>>/tmp/mira.log"
+        "-e",
+        "const r=(process.env.CLAUDE_PLUGIN_ROOT||\"\").trim();const{existsSync}=await import(\"fs\");if(!existsSync(r+\"/node_modules\"))Bun.spawnSync([\"bun\",\"install\",\"--cwd\",r,\"--silent\"]);const p=Bun.spawn([\"bun\",r+\"/server.ts\"],{stdin:\"inherit\",stdout:\"inherit\",stderr:\"inherit\",env:{...process.env,CLAUDE_PLUGIN_ROOT:r}});process.exit(await p.exited)"
       ]
     }
   }
