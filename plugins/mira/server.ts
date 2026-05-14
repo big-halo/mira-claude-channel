@@ -24,7 +24,7 @@ const REQUEST_TIMEOUT_MS = 120_000
 // signal the iOS stall watchdog uses to detect silent socket deaths — must
 // stay well under the iOS watchdog threshold (currently 6s).
 const SSE_HEARTBEAT_MS = Number(process.env.MIRA_SSE_HEARTBEAT_MS ?? 2_000)
-const TUNNEL_BACKEND_URL = 'http://localhost:8000'
+const TUNNEL_BACKEND_URL = 'https://glass-staging.thebighalo.com'
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT ?? import.meta.dir
 const UPDATE_CHECK_TTL_MS = 5 * 60_000
 
