@@ -6,4 +6,6 @@ if "%PLUGIN_ROOT:~-1%"=="\" set "PLUGIN_ROOT=%PLUGIN_ROOT:~0,-1%"
 set "CLAUDE_PLUGIN_ROOT=%PLUGIN_ROOT%"
 rem Ensure bun is on PATH — it installs to user profile, not system PATH
 set "PATH=%PATH%;%USERPROFILE%\.bun\bin"
+rem Install dependencies on first run (bun.lock ensures reproducible installs)
+if not exist "%PLUGIN_ROOT%\node_modules" bun install --cwd "%PLUGIN_ROOT%" --silent
 bun "%PLUGIN_ROOT%\server.ts"
