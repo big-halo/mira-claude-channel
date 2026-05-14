@@ -3,8 +3,8 @@
   "description": "Bridges chat from the Mira iOS app into Claude Code",
   "mcpServers": {
     "mira": {
-      "command": "cmd",
-      "args": ["/c", "bun \"${CLAUDE_PLUGIN_ROOT}/server.ts\""]
+      "command": "cmd.exe",
+      "args": ["/c", "${CLAUDE_PLUGIN_ROOT}\\start.cmd"]
     }
   }
 }
