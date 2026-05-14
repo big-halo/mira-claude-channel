@@ -1,36 +1,12 @@
-import { mkdirSync, writeFileSync, unlinkSync } from 'fs'
 
 const CLOUDFLARED_DIR = `${process.env.HOME}/.mira-mcp`
 const CLOUDFLARED_PATH = `${CLOUDFLARED_DIR}/cloudflared`
-// Persisted on disk so the SessionStart hook can read the current tunnel URL
-// without talking to the MCP server.
-const TUNNEL_URL_FILE = `${CLOUDFLARED_DIR}/tunnel.url`
 
 let tunnelUrl: string | null = null
 let tunnelError: string | null = null
 
 export const getTunnelUrl = () => tunnelUrl
 export const getTunnelError = () => tunnelError
-
-function clearTunnelUrlFile(log: (msg: string) => void) {
-  try {
-    unlinkSync(TUNNEL_URL_FILE)
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code
-    if (code && code !== 'ENOENT') {
-      log(`tunnel.url unlink failed: ${(err as Error).message}`)
-    }
-  }
-}
-
-function writeTunnelUrlFile(url: string, log: (msg: string) => void) {
-  try {
-    mkdirSync(CLOUDFLARED_DIR, { recursive: true })
-    writeFileSync(TUNNEL_URL_FILE, url)
-  } catch (err) {
-    log(`tunnel.url write failed: ${(err as Error).message}`)
-  }
-}
 
 async function ensureCloudflared(log: (msg: string) => void): Promise<string> {
   if (await Bun.file(CLOUDFLARED_PATH).exists()) return CLOUDFLARED_PATH
@@ -86,8 +62,6 @@ async function fetchProvisionedTunnel(opts: ProvisionOptions): Promise<Provision
 }
 
 export async function openProvisionedTunnel(opts: ProvisionOptions): Promise<void> {
-  clearTunnelUrlFile(opts.log)
-
   const provisioned = await fetchProvisionedTunnel(opts)
   if (provisioned) {
     opts.log(`tunnel provisioned hostname=${provisioned.hostname}`)
@@ -99,12 +73,10 @@ export async function openProvisionedTunnel(opts: ProvisionOptions): Promise<voi
   }
 
   const binary = await ensureCloudflared(opts.log)
-  const url = `https://${provisioned.hostname}`
-  tunnelUrl = url
+  tunnelUrl = `https://${provisioned.hostname}`
   tunnelError = null
-  writeTunnelUrlFile(url, opts.log)
 
-  opts.log(`tunnel opening (provisioned) hostname=${provisioned.hostname}`)
+  opts.log(`tunnel opening (provisioned) url=${tunnelUrl} hostname=${provisioned.hostname}`)
   const proc = Bun.spawn(
     [binary, 'tunnel', 'run', '--token', provisioned.token],
     {
@@ -114,7 +86,6 @@ export async function openProvisionedTunnel(opts: ProvisionOptions): Promise<voi
         opts.log(`cloudflared exited code=${code}`)
         tunnelUrl = null
         tunnelError = 'Tunnel closed. Restart the plugin to reconnect.'
-        clearTunnelUrlFile(opts.log)
       },
     },
   )

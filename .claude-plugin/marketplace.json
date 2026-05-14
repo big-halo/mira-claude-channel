@@ -4,13 +4,13 @@
     "name": "Mira"
   },
   "metadata": {
-    "description": "Bridges the Mira iOS app to a local Claude Code session"
+    "description": "Bridges the Mira glasses to a local Claude Code session"
   },
   "plugins": [
     {
       "name": "mira",
       "source": "./plugins/mira",
-      "description": "Bridges chat from the Mira iOS app into Claude Code over a local tunnel"
+      "description": "Bridges the Mira glasses to a local Claude Code session"
     }
   ]
 }

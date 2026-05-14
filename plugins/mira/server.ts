@@ -3,7 +3,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
-import { appendFileSync, mkdirSync, writeFileSync, existsSync } from 'fs'
+import { mkdirSync, writeFileSync, existsSync } from 'fs'
 import { openProvisionedTunnel, getTunnelUrl, getTunnelError } from './cloudflare'
 import { getOrCreateDevice } from './device'
 import {
@@ -17,7 +17,7 @@ import {
 import { join } from 'path'
 import { homedir } from 'os'
 
-const PORT = Number(process.env.MIRA_PORT ?? 3141)
+const PORT = Number(3141)
 const REQUEST_TIMEOUT_MS = 120_000
 // Periodic SSE comment to keep idle connections alive when no
 // status_update / tool_status events are firing.
@@ -26,19 +26,14 @@ const TUNNEL_BACKEND_URL = 'https://glass-staging.thebighalo.com'
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT ?? import.meta.dir
 const UPDATE_CHECK_TTL_MS = 5 * 60_000
 
-const LOG_FILE = process.env.MIRA_LOG ?? '/tmp/mira.log'
 function log(msg: string, extra?: unknown) {
   const line =
     `[${new Date().toISOString()}] ${msg}` +
     (extra !== undefined ? ` ${safeStringify(extra)}` : '') +
     '\n'
-  // stderr also goes to Claude Code's debug log when run with --debug
+  // The plugin launch command redirects stderr to /tmp/mira.log, catching both
+  // explicit logs and runtime errors that bypass this helper.
   process.stderr.write(line)
-  try {
-    appendFileSync(LOG_FILE, line)
-  } catch {
-    // best-effort; never crash on logging
-  }
 }
 function safeStringify(value: unknown): string {
   try {
@@ -57,7 +52,7 @@ let updateState: UpdateState = {
   checkedAt: 0,
   stale: false,
   localVersion: null,
-  status: null,
+  remoteVersion: null,
 }
 let updateCheckInFlight: Promise<UpdateState> | null = null
 
@@ -65,7 +60,7 @@ async function refreshUpdateState(): Promise<UpdateState> {
   updateState = await checkPluginUpdateState({ pluginRoot: PLUGIN_ROOT })
   log(
     `plugin update check local=${updateState.localVersion ?? '(unknown)'} ` +
-      `status=${updateState.status ?? '(unknown)'} stale=${updateState.stale}`,
+      `remote=${updateState.remoteVersion ?? '(unknown)'} stale=${updateState.stale}`,
   )
   return updateState
 }
@@ -81,7 +76,6 @@ async function currentUpdateState(): Promise<UpdateState> {
         updateState = {
           ...updateState,
           checkedAt: Date.now(),
-          status: 'check_failed',
         }
         return updateState
       })
@@ -178,7 +172,7 @@ async function syncConversationsToMarkdown() {
   log(`conversation sync OK user_id=${connection.userId} sessions=${sessions.length}`)
 }
 
-log(`boot pid=${process.pid} port=${PORT} log=${LOG_FILE}`)
+log(`boot pid=${process.pid} port=${PORT}`)
 
 type BufferedEvent = { id: number; payload: string }
 
@@ -633,6 +627,20 @@ process.stdin.on('end', () => shutdown('stdin end'))
 process.stdin.on('close', () => shutdown('stdin close'))
 process.on('SIGTERM', () => shutdown('SIGTERM'))
 process.on('SIGINT', () => shutdown('SIGINT'))
+
+// Free the port: if a previous Mira instance is still bound, kill it so we can bind.
+try {
+  const out = Bun.spawnSync(['lsof', '-ti', `tcp:${PORT}`]).stdout
+  const pids = new TextDecoder().decode(out).trim().split('\n').filter(Boolean)
+  for (const pid of pids) {
+    if (Number(pid) === process.pid) continue
+    log(`killing existing process on port ${PORT} pid=${pid}`)
+    try { process.kill(Number(pid), 'SIGKILL') } catch { /* ignore */ }
+  }
+  if (pids.length) Bun.sleepSync(150)
+} catch (err) {
+  log(`port preflight failed: ${(err as Error).message}`)
+}
 
 Bun.serve({
   port: PORT,

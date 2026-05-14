@@ -49,10 +49,6 @@ export function canShowTunnelUrl(state: UpdateState): boolean {
   return !state.stale
 }
 
-export const CHANNELS_REQUIRED_MESSAGE =
-  'Mira bridge not fully active — restart Claude with:\n' +
-  '  claude --dangerously-load-development-channels plugin:mira@mira-marketplace\n' +
-  '(or use the `mira` alias if you have it :)'
 
 function localPluginVersion(pluginRoot: string): string | null {
   // server.ts lives at plugin root; hooks live one level deeper in hooks/

@@ -8,19 +8,21 @@
 // single source of truth; edit it there and both paths pick up the change.
 
 import { join } from 'path'
+import { appendFileSync } from 'fs'
 import {
   autoUpdatePlugin,
   AUTO_UPDATE_RELOAD_MESSAGE,
   canShowTunnelUrl,
-  CHANNELS_REQUIRED_MESSAGE,
   checkPluginUpdateState,
   TUNNEL_BLOCKED_MESSAGE,
 } from '../plugin_update'
 
-const URL_FILE = `${process.env.HOME}/.mira-mcp/tunnel.url`
-const ERROR_FILE = `${process.env.HOME}/.mira-mcp/tunnel.error`
 const AGENT_FILE = join(import.meta.dir, '..', 'agents', 'mira.md')
-const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT ?? join(import.meta.dir, '..')
+const LOG_FILE = '/tmp/mira.log'
+
+function log(msg: string) {
+  appendFileSync(LOG_FILE, `[session-start] ${new Date().toISOString()} ${msg}\n`)
+}
 
 function hasChannelsFlag(): boolean {
   try {
@@ -41,36 +43,26 @@ function hasChannelsFlag(): boolean {
 }
 
 const channelsActive = hasChannelsFlag()
+log(`channels-flag=${channelsActive}`)
 
-// When channels are active the URL will arrive via channel notification — skip
-// the polling loop so we output the placeholder fast and win the race.
-let url = ''
-let tunnelError = ''
-if (!channelsActive) {
-  for (let i = 0; i < 12 && !url; i++) {
-    url = (await Bun.file(URL_FILE).text().catch(() => '')).trim()
-    tunnelError = (await Bun.file(ERROR_FILE).text().catch(() => '')).trim()
-    if (!url && !tunnelError) await Bun.sleep(500)
-  }
-}
-
+const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT ?? join(import.meta.dir, '..')
 const agentPrompt = (await Bun.file(AGENT_FILE).text().catch(() => '')).trim()
 
 let systemMessage: string
-try {
-  const state = await checkPluginUpdateState({ pluginRoot: PLUGIN_ROOT })
-  if (!canShowTunnelUrl(state)) {
-    const updated = autoUpdatePlugin()
-    systemMessage = updated.ok ? AUTO_UPDATE_RELOAD_MESSAGE : TUNNEL_BLOCKED_MESSAGE
-  } else if (!channelsActive) {
-    systemMessage = CHANNELS_REQUIRED_MESSAGE
-  } else {
+if (!channelsActive) {
+  systemMessage = 'Mira will not work — restart Claude with: claude --dangerously-load-development-channels plugin:mira@mira-marketplace'
+} else {
+  try {
+    const state = await checkPluginUpdateState({ pluginRoot: PLUGIN_ROOT })
+    if (!canShowTunnelUrl(state)) {
+      const updated = autoUpdatePlugin()
+      systemMessage = updated.ok ? AUTO_UPDATE_RELOAD_MESSAGE : TUNNEL_BLOCKED_MESSAGE
+    } else {
+      systemMessage = 'Mira is spinning up — tunnel coming in hot 🫡'
+    }
+  } catch {
     systemMessage = 'Mira is spinning up — tunnel coming in hot 🫡'
   }
-} catch {
-  systemMessage = channelsActive
-    ? 'Mira is spinning up — tunnel coming in hot 🫡'
-    : CHANNELS_REQUIRED_MESSAGE
 }
 
 console.log(JSON.stringify({
