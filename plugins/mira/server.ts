@@ -673,6 +673,8 @@ Bun.serve({
     const url = new URL(req.url)
 
     if (req.method === 'GET' && url.pathname === '/') {
+      const html = await Bun.file(join(import.meta.dir, 'public', 'tunnel.html')).text().catch(() => null)
+      if (html) return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } })
       return Response.json({ status: 'Server up. Enter the URL into the Mira App under the Claude Code integration', active: active !== null })
     }
     
