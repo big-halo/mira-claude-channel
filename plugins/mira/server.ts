@@ -21,7 +21,9 @@ const REQUEST_TIMEOUT_MS = 120_000
 // Periodic SSE comment to keep idle connections alive when no
 // status_update / tool_status events are firing.
 const SSE_HEARTBEAT_MS = Number(process.env.MIRA_SSE_HEARTBEAT_MS ?? 15_000)
-const TUNNEL_BACKEND_URL = 'https://glass-staging.thebighalo.com'
+const TUNNEL_BACKEND_URL = process.env.MIRA_TUNNEL_BACKEND_URL ?? 'https://glass-staging.thebighalo.com'
+const DEV_BACKEND_URL = process.env.MIRA_DEV_BACKEND_URL ?? null
+const DEV_TOKEN = process.env.MIRA_DEV_TOKEN ?? 'dev-local-token'
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT ?? import.meta.dir
 const UPDATE_CHECK_TTL_MS = 5 * 60_000
 
@@ -903,6 +905,13 @@ Bun.serve({
 })
 
 log(`http listener up on http://127.0.0.1:${PORT}`)
+
+// Dev mode: auto-connect EventShipper to a local backend so telemetry
+// flows without needing the iOS app to call /connect.
+if (DEV_BACKEND_URL) {
+  events.setConnection({ userId: 'dev-plugin', accessToken: DEV_TOKEN, backendBaseUrl: DEV_BACKEND_URL })
+  log(`dev mode: EventShipper auto-connected to ${DEV_BACKEND_URL}`)
+}
 
 void currentUpdateState().catch((err) => {
   log(`plugin update check failed: ${(err as Error).message}`)
