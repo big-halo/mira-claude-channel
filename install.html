@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Install Mira — Claude Code Plugin</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #080808;
+      --surface: #111111;
+      --border: #1f1f1f;
+      --text: #f0f0f0;
+      --muted: #888;
+      --accent: #ffffff;
+      --code-bg: #161616;
+      --green: #4ade80;
+      --tab-active: #ffffff;
+      --tab-inactive: #555;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif;
+      font-size: 15px;
+      line-height: 1.6;
+      min-height: 100vh;
+    }
+
+    /* NAV */
+    nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 20px 40px;
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      background: rgba(8,8,8,0.9);
+      backdrop-filter: blur(12px);
+      z-index: 100;
+    }
+    .logo {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text);
+      text-decoration: none;
+    }
+    .nav-links { display: flex; gap: 28px; }
+    .nav-links a {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 14px;
+      transition: color 0.15s;
+    }
+    .nav-links a:hover { color: var(--text); }
+
+    /* HERO */
+    .hero {
+      text-align: center;
+      padding: 96px 24px 72px;
+      max-width: 680px;
+      margin: 0 auto;
+    }
+    .badge {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 4px 12px;
+      margin-bottom: 28px;
+    }
+    h1 {
+      font-size: clamp(32px, 5vw, 52px);
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      line-height: 1.1;
+      margin-bottom: 20px;
+    }
+    .hero p {
+      font-size: 17px;
+      color: var(--muted);
+      max-width: 460px;
+      margin: 0 auto;
+    }
+
+    /* MAIN CONTENT */
+    main {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 0 24px 96px;
+    }
+
+    section { margin-bottom: 64px; }
+
+    h2 {
+      font-size: 22px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      margin-bottom: 24px;
+      color: var(--text);
+    }
+
+    /* DEPENDENCY CARDS */
+    .dep-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 12px;
+    }
+    .dep-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 18px 20px;
+    }
+    .dep-name {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    .dep-note {
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+    .dep-required {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--green);
+      margin-bottom: 8px;
+    }
+    .dep-auto {
+      color: #60a5fa;
+    }
+    .dep-optional {
+      color: #f59e0b;
+    }
+
+    /* PLATFORM TABS */
+    .tabs {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 28px;
+    }
+    .tab {
+      padding: 10px 20px;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--tab-inactive);
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+      transition: color 0.15s, border-color 0.15s;
+      background: none;
+      border-top: none;
+      border-left: none;
+      border-right: none;
+    }
+    .tab.active {
+      color: var(--tab-active);
+      border-bottom-color: var(--tab-active);
+    }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+
+    /* STEPS */
+    .steps { display: flex; flex-direction: column; gap: 20px; }
+    .step {
+      display: flex;
+      gap: 16px;
+      align-items: flex-start;
+    }
+    .step-num {
+      flex-shrink: 0;
+      width: 26px;
+      height: 26px;
+      border-radius: 50%;
+      border: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+    .step-body { flex: 1; }
+    .step-title {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+    .step-desc {
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 10px;
+      line-height: 1.5;
+    }
+
+    /* CODE BLOCKS */
+    .code-block {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      overflow: hidden;
+    }
+    .code-block code {
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 13px;
+      color: #e2e8f0;
+      white-space: pre;
+      overflow: auto;
+      flex: 1;
+    }
+    .copy-btn {
+      flex-shrink: 0;
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 500;
+      padding: 4px 10px;
+      border-radius: 5px;
+      cursor: pointer;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .copy-btn:hover { color: var(--text); border-color: #444; }
+    .copy-btn.copied { color: var(--green); border-color: var(--green); }
+
+    /* DIVIDER */
+    hr {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 64px 0;
+    }
+
+    /* NOTE */
+    .note {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-left: 3px solid #3b82f6;
+      border-radius: 8px;
+      padding: 14px 16px;
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+    .note strong { color: var(--text); }
+
+    /* FOOTER */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 32px 40px;
+      text-align: center;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    footer a { color: var(--muted); text-decoration: underline; }
+  </style>
+</head>
+<body>
+
+<nav>
+  <a class="logo" href="https://trymira.com">Mira</a>
+  <div class="nav-links">
+    <a href="https://trymira.com">Home</a>
+    <a href="https://github.com/big-halo/mira-claude-channel" target="_blank">GitHub</a>
+    <a href="mailto:team@trymira.com">Support</a>
+  </div>
+</nav>
+
+<div class="hero">
+  <span class="badge">Claude Code Plugin</span>
+  <h1>Connect Mira to Claude Code</h1>
+  <p>Stream live audio from your glasses into Claude Code — get real-time answers, hands-free.</p>
+</div>
+
+<main>
+
+  <!-- DEPENDENCIES -->
+  <section>
+    <h2>Dependencies</h2>
+    <div class="dep-grid">
+      <div class="dep-card">
+        <span class="dep-required">Required</span>
+        <div class="dep-name">Bun</div>
+        <div class="dep-note">JavaScript runtime used to run the plugin server. Install from bun.sh.</div>
+      </div>
+      <div class="dep-card">
+        <span class="dep-required">Required</span>
+        <div class="dep-name">Claude Code</div>
+        <div class="dep-note">Anthropic's CLI. Install via bun after bun is set up.</div>
+      </div>
+      <div class="dep-card">
+        <span class="dep-required dep-auto">Auto-installed</span>
+        <div class="dep-name">cloudflared</div>
+        <div class="dep-note">Downloaded automatically by the plugin on first launch. No manual step needed.</div>
+      </div>
+      <div class="dep-card">
+        <span class="dep-required dep-optional">Windows only</span>
+        <div class="dep-name">Git for Windows</div>
+        <div class="dep-note">Provides shell tools needed for the marketplace install on Windows.</div>
+      </div>
+    </div>
+  </section>
+
+  <hr />
+
+  <!-- INSTALL STEPS -->
+  <section>
+    <h2>Installation</h2>
+
+    <div class="tabs">
+      <button class="tab active" onclick="switchTab('mac')">macOS / Linux</button>
+      <button class="tab" onclick="switchTab('windows')">Windows</button>
+    </div>
+
+    <!-- MAC -->
+    <div class="tab-content active" id="tab-mac">
+      <div class="steps">
+        <div class="step">
+          <div class="step-num">1</div>
+          <div class="step-body">
+            <div class="step-title">Install Bun</div>
+            <div class="step-desc">Run the one-liner in your terminal. Restart your terminal after.</div>
+            <div class="code-block">
+              <code>curl -fsSL https://bun.sh/install | bash</code>
+              <button class="copy-btn" onclick="copy(this, 'curl -fsSL https://bun.sh/install | bash')">Copy</button>
+            </div>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">2</div>
+          <div class="step-body">
+            <div class="step-title">Install Claude Code</div>
+            <div class="step-desc">Global install via bun.</div>
+            <div class="code-block">
+              <code>bun install -g @anthropic-ai/claude-code</code>
+              <button class="copy-btn" onclick="copy(this, 'bun install -g @anthropic-ai/claude-code')">Copy</button>
+            </div>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">3</div>
+          <div class="step-body">
+            <div class="step-title">Launch Claude with Mira</div>
+            <div class="step-desc">This installs the plugin on first run and downloads cloudflared automatically.</div>
+            <div class="code-block">
+              <code>claude --dangerously-load-development-channels plugin:mira@mira-marketplace</code>
+              <button class="copy-btn" onclick="copy(this, 'claude --dangerously-load-development-channels plugin:mira@mira-marketplace')">Copy</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- WINDOWS -->
+    <div class="tab-content" id="tab-windows">
+      <div class="steps">
+        <div class="step">
+          <div class="step-num">1</div>
+          <div class="step-body">
+            <div class="step-title">Install Bun</div>
+            <div class="step-desc">Open PowerShell and run. Restart PowerShell after.</div>
+            <div class="code-block">
+              <code>irm bun.sh/install.ps1 | iex</code>
+              <button class="copy-btn" onclick="copy(this, 'irm bun.sh/install.ps1 | iex')">Copy</button>
+            </div>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">2</div>
+          <div class="step-body">
+            <div class="step-title">Install Git for Windows</div>
+            <div class="step-desc">Required for the plugin marketplace. Download and run the installer.</div>
+            <div class="code-block">
+              <code>https://git-scm.com/download/win</code>
+              <button class="copy-btn" onclick="copy(this, 'https://git-scm.com/download/win')">Copy</button>
+            </div>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">3</div>
+          <div class="step-body">
+            <div class="step-title">Install Claude Code</div>
+            <div class="step-desc">Run in a new PowerShell window after restarting.</div>
+            <div class="code-block">
+              <code>bun install -g @anthropic-ai/claude-code</code>
+              <button class="copy-btn" onclick="copy(this, 'bun install -g @anthropic-ai/claude-code')">Copy</button>
+            </div>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">4</div>
+          <div class="step-body">
+            <div class="step-title">Launch Claude with Mira</div>
+            <div class="step-desc">cloudflared downloads automatically on first launch.</div>
+            <div class="code-block">
+              <code>claude --dangerously-load-development-channels plugin:mira@mira-marketplace</code>
+              <button class="copy-btn" onclick="copy(this, 'claude --dangerously-load-development-channels plugin:mira@mira-marketplace')">Copy</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-top: 28px;">
+      <div class="note">
+        <strong>Tunnel URL</strong> — After launching, Claude will display a tunnel URL like <code style="font-family: monospace; font-size: 12px;">https://d-xxxxxxxx.trymira.com</code>. Paste this into the Mira iOS app under <strong>Integrations → Claude Code</strong>.
+      </div>
+    </div>
+  </section>
+
+  <hr />
+
+  <!-- TROUBLESHOOTING -->
+  <section>
+    <h2>Troubleshooting</h2>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">?</div>
+        <div class="step-body">
+          <div class="step-title">No tunnel URL shown</div>
+          <div class="step-desc">The plugin downloads cloudflared on first run — wait ~5 seconds. If it still doesn't appear, run <code style="font-family: monospace; font-size: 12px;">/plugin uninstall mira@mira-marketplace</code> then reinstall.</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">?</div>
+        <div class="step-body">
+          <div class="step-title">Windows: "bun not found"</div>
+          <div class="step-desc">Close and reopen PowerShell after installing bun — the PATH update requires a new session.</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">?</div>
+        <div class="step-body">
+          <div class="step-title">Plugin won't install</div>
+          <div class="step-desc">Make sure Git is installed on Windows. The marketplace uses GitHub to fetch plugin files.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  &copy; 2026 Mira &mdash; <a href="https://trymira.com">trymira.com</a>
+</footer>
+
+<script>
+  function switchTab(platform) {
+    document.querySelectorAll('.tab').forEach((t, i) => {
+      t.classList.toggle('active', (i === 0 && platform === 'mac') || (i === 1 && platform === 'windows'));
+    });
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    document.getElementById('tab-' + platform).classList.add('active');
+  }
+
+  function copy(btn, text) {
+    navigator.clipboard.writeText(text).then(() => {
+      btn.textContent = 'Copied';
+      btn.classList.add('copied');
+      setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1800);
+    });
+  }
+</script>
+
+</body>
+</html>
