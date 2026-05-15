@@ -6,7 +6,7 @@
       "command": "bun",
       "args": [
         "-e",
-        "const r=(process.env.CLAUDE_PLUGIN_ROOT||\"\").trim();const{existsSync}=await import(\"fs\");if(!existsSync(r+\"/node_modules\"))Bun.spawnSync([\"bun\",\"install\",\"--cwd\",r,\"--silent\"]);const p=Bun.spawn([\"bun\",r+\"/server.ts\"],{stdin:\"inherit\",stdout:\"inherit\",stderr:\"inherit\",env:{...process.env,CLAUDE_PLUGIN_ROOT:r}});process.exit(await p.exited)"
+        "const r=(process.env.CLAUDE_PLUGIN_ROOT||\"\").trim();if(process.platform===\"win32\"){Bun.spawnSync([\"cmd.exe\",\"/c\",r+\"\\\\start.cmd\"],{stdin:\"inherit\",stdout:\"inherit\",stderr:\"inherit\"})}else{const{existsSync}=await import(\"fs\");if(!existsSync(r+\"/node_modules\"))Bun.spawnSync([\"bun\",\"install\",\"--cwd\",r,\"--silent\"]);const p=Bun.spawn([\"bun\",r+\"/server.ts\"],{stdin:\"inherit\",stdout:\"inherit\",stderr:\"inherit\",env:{...process.env,CLAUDE_PLUGIN_ROOT:r}});process.exit(await p.exited)}"
       ]
     }
   }
