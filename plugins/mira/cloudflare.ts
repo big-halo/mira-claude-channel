@@ -2,9 +2,7 @@ import { mkdirSync, writeFileSync, unlinkSync } from 'fs'
 import { miraPath } from './paths'
 
 const CLOUDFLARED_DIR = miraPath()
-const CLOUDFLARED_PATH = process.platform === 'win32'
-  ? `${CLOUDFLARED_DIR}/cloudflared.exe`
-  : `${CLOUDFLARED_DIR}/cloudflared`
+const CLOUDFLARED_PATH = `${CLOUDFLARED_DIR}/cloudflared${process.platform === 'win32' ? '.exe' : ''}`
 // Persisted on disk so the SessionStart hook can read the current tunnel URL
 // without talking to the MCP server.
 const TUNNEL_URL_FILE = `${CLOUDFLARED_DIR}/tunnel.url`
