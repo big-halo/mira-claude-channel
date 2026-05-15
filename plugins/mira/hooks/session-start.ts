@@ -8,38 +8,61 @@
 // single source of truth; edit it there and both paths pick up the change.
 
 import { join } from 'path'
+import { appendFileSync } from 'fs'
 import {
-  appendUpdateNotice,
+  autoUpdatePlugin,
+  AUTO_UPDATE_RELOAD_MESSAGE,
+  canShowTunnelUrl,
   checkPluginUpdateState,
+  TUNNEL_BLOCKED_MESSAGE,
 } from '../plugin_update'
-import { miraPath } from '../paths'
 
-const URL_FILE = miraPath('tunnel.url')
-const ERROR_FILE = miraPath('tunnel.error')
 const AGENT_FILE = join(import.meta.dir, '..', 'agents', 'mira.md')
-const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT ?? join(import.meta.dir, '..')
+const LOG_FILE = '/tmp/mira.log'
 
-let url = ''
-let tunnelError = ''
-for (let i = 0; i < 12 && !url; i++) {
-  url = (await Bun.file(URL_FILE).text().catch(() => '')).trim()
-  tunnelError = (await Bun.file(ERROR_FILE).text().catch(() => '')).trim()
-  if (!url && !tunnelError) await Bun.sleep(500)
+function log(msg: string) {
+  appendFileSync(LOG_FILE, `[session-start] ${new Date().toISOString()} ${msg}\n`)
 }
 
-const agentPrompt = (await Bun.file(AGENT_FILE).text().catch(() => '')).trim()
-const tunnelMessage = url
-  ? `\nMira Tunnel URL (paste in Mira app to Integrations > Claude Code):\n ${url}`
-  : tunnelError
-    ? `Mira tunnel unavailable: ${tunnelError}`
-  : `Mira tunnel: still starting up…`
+function hasChannelsFlag(): boolean {
+  try {
+    let pid = process.ppid
+    for (let i = 0; i < 8; i++) {
+      const proc = Bun.spawnSync(['ps', '-p', String(pid), '-o', 'ppid=,args='])
+      const line = new TextDecoder().decode(proc.stdout).trim()
+      if (!line) break
+      if (line.includes('dangerously-load-development-channels')) return true
+      const spaceIdx = line.indexOf(' ')
+      if (spaceIdx < 0) break
+      const ppid = parseInt(line.slice(0, spaceIdx).trim())
+      if (!ppid || ppid === pid || ppid <= 1) break
+      pid = ppid
+    }
+  } catch {}
+  return false
+}
 
-let systemMessage = tunnelMessage
-try {
-  const state = await checkPluginUpdateState({ pluginRoot: PLUGIN_ROOT })
-  systemMessage = appendUpdateNotice(tunnelMessage, state)
-} catch {
-  // The hook should never block startup if GitHub is unreachable.
+const channelsActive = hasChannelsFlag()
+log(`channels-flag=${channelsActive}`)
+
+const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT ?? join(import.meta.dir, '..')
+const agentPrompt = (await Bun.file(AGENT_FILE).text().catch(() => '')).trim()
+
+let systemMessage: string
+if (!channelsActive) {
+  systemMessage = 'Mira will not work — restart Claude with: claude --dangerously-load-development-channels plugin:mira@mira-marketplace'
+} else {
+  try {
+    const state = await checkPluginUpdateState({ pluginRoot: PLUGIN_ROOT })
+    if (!canShowTunnelUrl(state)) {
+      const updated = autoUpdatePlugin()
+      systemMessage = updated.ok ? AUTO_UPDATE_RELOAD_MESSAGE : TUNNEL_BLOCKED_MESSAGE
+    } else {
+      systemMessage = 'Mira is spinning up — tunnel coming in hot 🫡'
+    }
+  } catch {
+    systemMessage = 'Mira is spinning up — tunnel coming in hot 🫡'
+  }
 }
 
 console.log(JSON.stringify({
