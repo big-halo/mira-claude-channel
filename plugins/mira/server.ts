@@ -6,6 +6,7 @@ import { z } from 'zod'
 import { mkdirSync, writeFileSync, existsSync } from 'fs'
 import { openProvisionedTunnel, getTunnelUrl, getTunnelError } from './cloudflare'
 import { getOrCreateDevice } from './device'
+import { PluginEventShipper } from './events'
 import {
   appendUpdateNotice,
   autoUpdatePlugin,
@@ -43,6 +44,11 @@ function safeStringify(value: unknown): string {
   } catch {
     return String(value)
   }
+}
+
+const events = new PluginEventShipper({ log })
+function emit(kind: string, payload: Record<string, unknown> = {}, level: 'info' | 'warn' | 'error' = 'info') {
+  events.emit(kind, payload, level)
 }
 
 function basename(p: string): string {
@@ -361,6 +367,7 @@ async function runStreamLifecycle(
       broadcast(p, { text: payload.text })
       broadcast(p, { sources: payload.sources })
       emitDone(p)
+      emit('chat_done', { text_len: payload.text.length })
     }
   } catch (err) {
     const message = err instanceof ChatClosedError ? err.reason : 'failed'
@@ -637,7 +644,8 @@ log('mcp stdio connected')
 const shutdown = (reason: string) => {
   log(`shutdown reason=${reason}`)
   try { Bun.file(PID_FILE).text().then(t => { if (parseInt(t.trim()) === process.pid) writeFileSync(PID_FILE, '') }) } catch { /* best-effort */ }
-  process.exit(0)
+  void events.flush().finally(() => process.exit(0))
+  setTimeout(() => process.exit(0), 1_500)
 }
 process.stdin.on('end', () => shutdown('stdin end'))
 process.stdin.on('close', () => shutdown('stdin close'))
@@ -715,7 +723,9 @@ Bun.serve({
         log(`conversation sync failed: ${(err as Error).stack ?? (err as Error).message}`)
       })
 
+      events.setConnection({ userId, accessToken, backendBaseUrl })
       log(`connect OK user_id=${userId} backend=${backendBaseUrl} token_len=${accessToken.length}`)
+      emit('connect', { user_id: userId })
       return Response.json({
         status: 'connected',
         user_id: userId,
@@ -739,6 +749,7 @@ Bun.serve({
       const userId = connection?.userId
       connection = null
       log(`disconnect was_connected=${wasConnected} user_id=${userId ?? '(none)'}`)
+      void events.flush().finally(() => events.setConnection(null))
       return Response.json({ status: 'disconnected' })
     }
 
@@ -793,6 +804,7 @@ Bun.serve({
         include_in_tools_used: true,
       }
       broadcast(p, { tool_status: payload })
+      if (state === 'started') emit('tool_call', { tool_name: toolName })
       return Response.json({ status: 'delivered' })
     }
 
@@ -885,6 +897,7 @@ Bun.serve({
 
 
       const { entry, response } = openPendingChat()
+      emit('chat_in', { text_len: userText.length })
       try {
         log(`chat IN session_id=${entry.sessionId} chars=${userText.length}`)
         await mcp.notification({
@@ -938,6 +951,7 @@ void openProvisionedTunnel({
               content: `Mira tunnel URL (paste in Mira iOS app → Integrations → Claude Code):\n${url}\n\nAfter echoing the tunnel URL above exactly as instructed, introduce yourself and briefly describe what you can do for the user (including access to past Mira conversations capabilities).`,
             },
           })
+          emit('tunnel_ready', { url })
           log(`tunnel URL pushed via channel url=${url}`)
         } catch (notifyErr) {
           log(`tunnel channel notify failed: ${(notifyErr as Error).message}`)
@@ -955,6 +969,7 @@ void openProvisionedTunnel({
   .catch(async (err) => {
     const msg = (err as Error).message
     log(`tunnel open failed: ${msg}`)
+    emit('tunnel_failed', { error: msg }, 'error')
     try {
       await mcp.notification({
         method: 'notifications/claude/channel',
