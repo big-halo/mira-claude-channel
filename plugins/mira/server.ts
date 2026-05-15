@@ -175,20 +175,19 @@ async function syncConversationsToMarkdown() {
 }
 
 // Kill any previous server instance that may still own the port.
-const PID_FILE = join(homedir(), '.mira-mcp', 'server.pid')
+const PID_FILE = `${process.env.HOME}/.mira-mcp/server.pid`
 try {
   const prev = parseInt((await Bun.file(PID_FILE).text().catch(() => '')).trim())
   if (prev && prev !== process.pid) {
     try {
-      // On Windows SIGTERM isn't supported — use the default signal (SIGTERM on Unix, terminate on Windows)
-      process.kill(prev)
+      process.kill(prev, 'SIGTERM')
       log(`killed previous server pid=${prev}`)
       await Bun.sleep(300)
     } catch { /* already gone */ }
   }
 } catch { /* no pid file yet */ }
 try {
-  mkdirSync(join(homedir(), '.mira-mcp'), { recursive: true })
+  mkdirSync(`${process.env.HOME}/.mira-mcp`, { recursive: true })
   writeFileSync(PID_FILE, String(process.pid))
 } catch { /* best-effort */ }
 
@@ -637,7 +636,7 @@ log('mcp stdio connected')
 // alive forever after stdio closes.
 const shutdown = (reason: string) => {
   log(`shutdown reason=${reason}`)
-  try { writeFileSync(PID_FILE, '') } catch { /* best-effort */ }
+  try { Bun.file(PID_FILE).text().then(t => { if (parseInt(t.trim()) === process.pid) writeFileSync(PID_FILE, '') }) } catch { /* best-effort */ }
   process.exit(0)
 }
 process.stdin.on('end', () => shutdown('stdin end'))
@@ -667,6 +666,8 @@ Bun.serve({
     const url = new URL(req.url)
 
     if (req.method === 'GET' && url.pathname === '/') {
+      const html = await Bun.file(join(import.meta.dir, 'public', 'tunnel.html')).text().catch(() => null)
+      if (html) return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } })
       return Response.json({ status: 'Server up. Enter the URL into the Mira App under the Claude Code integration', active: active !== null })
     }
     
@@ -899,6 +900,10 @@ Bun.serve({
         log(`chat failed err=${(err as Error).stack ?? (err as Error).message}`)
         return Response.json({ error: { message: 'failed to send message to Claude' } }, { status: 500 })
       }
+    }
+
+    if (req.method === 'GET' && url.pathname === '/unused-duplicate') {
+      // removed: duplicate GET / handler — now handled at top of fetch()
     }
 
     return new Response('not found', { status: 404 })
