@@ -2,6 +2,8 @@
 
 type StopHookInput = {
   session_id?: string
+  transcript_path?: string
+  stop_hook_active?: boolean
   last_assistant_message?: string
 }
 
@@ -24,6 +26,8 @@ async function main() {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       session_id: input.session_id,
+      transcript_path: input.transcript_path,
+      stop_hook_active: input.stop_hook_active,
       last_assistant_message: message,
     }),
   }).catch((err) => {

@@ -3,39 +3,44 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
-import { mkdirSync, writeFileSync, existsSync } from 'fs'
+import { appendFileSync, mkdirSync, writeFileSync, existsSync } from 'fs'
 import { openProvisionedTunnel, getTunnelUrl, getTunnelError } from './cloudflare'
 import { getOrCreateDevice } from './device'
+import { PluginEventShipper } from './events'
 import {
   appendUpdateNotice,
-  autoUpdatePlugin,
-  canShowTunnelUrl,
   checkPluginUpdateState,
-  TUNNEL_BLOCKED_MESSAGE,
   type UpdateState,
 } from './plugin_update'
+import { miraPath } from './paths'
 import { join } from 'path'
 import { homedir } from 'os'
 
-const PORT = Number(3141)
+const PORT = Number(process.env.MIRA_PORT ?? 3141)
 const REQUEST_TIMEOUT_MS = 120_000
 // Periodic SSE comment to keep idle connections alive when no
-// status_update / tool_status events are firing. Also acts as the liveness
-// signal the iOS stall watchdog uses to detect silent socket deaths — must
-// stay well under the iOS watchdog threshold (currently 6s).
-const SSE_HEARTBEAT_MS = Number(process.env.MIRA_SSE_HEARTBEAT_MS ?? 2_000)
-const TUNNEL_BACKEND_URL = 'https://glass-staging.thebighalo.com'
+// status_update / tool_status events are firing.
+const SSE_HEARTBEAT_MS = Number(process.env.MIRA_SSE_HEARTBEAT_MS ?? 15_000)
+const TUNNEL_BACKEND_URL = process.env.MIRA_TUNNEL_BACKEND_URL ?? 'https://glass-staging.thebighalo.com'
+const DEV_BACKEND_URL = process.env.MIRA_DEV_BACKEND_URL ?? null
+const DEV_TOKEN = process.env.MIRA_DEV_TOKEN ?? 'dev-local-token'
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT ?? import.meta.dir
 const UPDATE_CHECK_TTL_MS = 5 * 60_000
 
+const LOG_FILE = process.env.MIRA_LOG ?? miraPath('mira.log')
 function log(msg: string, extra?: unknown) {
   const line =
     `[${new Date().toISOString()}] ${msg}` +
     (extra !== undefined ? ` ${safeStringify(extra)}` : '') +
     '\n'
-  // The plugin launch command redirects stderr to /tmp/mira.log, catching both
-  // explicit logs and runtime errors that bypass this helper.
+  // stderr also goes to Claude Code's debug log when run with --debug
   process.stderr.write(line)
+  try {
+    mkdirSync(miraPath(), { recursive: true })
+    appendFileSync(LOG_FILE, line)
+  } catch {
+    // best-effort; never crash on logging
+  }
 }
 function safeStringify(value: unknown): string {
   try {
@@ -43,6 +48,16 @@ function safeStringify(value: unknown): string {
   } catch {
     return String(value)
   }
+}
+
+// Structured event shipper — batches JSON events to /telemetry/plugin-events
+// so the observability-platform dashboard can render a channel timeline.
+// Free-form log() lines still go to /tmp/mira.log; these are additive.
+const events = new PluginEventShipper({ log })
+events.start()
+
+function emit(kind: string, payload: Record<string, unknown> = {}, level: 'info' | 'warn' | 'error' = 'info') {
+  events.emit(kind, payload, level)
 }
 
 function basename(p: string): string {
@@ -54,7 +69,7 @@ let updateState: UpdateState = {
   checkedAt: 0,
   stale: false,
   localVersion: null,
-  remoteVersion: null,
+  status: null,
 }
 let updateCheckInFlight: Promise<UpdateState> | null = null
 
@@ -62,7 +77,7 @@ async function refreshUpdateState(): Promise<UpdateState> {
   updateState = await checkPluginUpdateState({ pluginRoot: PLUGIN_ROOT })
   log(
     `plugin update check local=${updateState.localVersion ?? '(unknown)'} ` +
-      `remote=${updateState.remoteVersion ?? '(unknown)'} stale=${updateState.stale}`,
+      `status=${updateState.status ?? '(unknown)'} stale=${updateState.stale}`,
   )
   return updateState
 }
@@ -78,6 +93,7 @@ async function currentUpdateState(): Promise<UpdateState> {
         updateState = {
           ...updateState,
           checkedAt: Date.now(),
+          status: 'check_failed',
         }
         return updateState
       })
@@ -135,7 +151,7 @@ async function syncConversationsToMarkdown() {
   const listRes = await backendGet('/messages/list')
   if (!listRes.ok) {
     const body = await listRes.text().catch(() => '')
-    log(`conversation sync backend error status=${listRes.status} body=${body}`)
+    log(`conversation sync backend error status=${listRes.status} body=${body.slice(0, 200)}`)
     return
   }
   const data = (await listRes.json()) as { sessions: BackendSession[] }
@@ -152,7 +168,7 @@ async function syncConversationsToMarkdown() {
     )
     if (!detailRes.ok) {
       const body = await detailRes.text().catch(() => '')
-      log(`session sync failed id=${session.id} status=${detailRes.status} body=${body}`)
+      log(`session sync failed id=${session.id} status=${detailRes.status} body=${body.slice(0, 200)}`)
       continue
     }
     const detail = (await detailRes.json()) as BackendSessionDetail
@@ -191,7 +207,7 @@ try {
   writeFileSync(PID_FILE, String(process.pid))
 } catch { /* best-effort */ }
 
-log(`boot pid=${process.pid} port=${PORT}`)
+log(`boot pid=${process.pid} port=${PORT} log=${LOG_FILE}`)
 
 type BufferedEvent = { id: number; payload: string }
 
@@ -361,6 +377,7 @@ async function runStreamLifecycle(
       broadcast(p, { text: payload.text })
       broadcast(p, { sources: payload.sources })
       emitDone(p)
+      emit('chat_done', { text_len: payload.text.length })
     }
   } catch (err) {
     const message = err instanceof ChatClosedError ? err.reason : 'failed'
@@ -464,6 +481,7 @@ const mcp = new Server(
 )
 
 mcp.setRequestHandler(ListToolsRequestSchema, async () => {
+  log('mcp list_tools')
   return {
     tools: [
       {
@@ -494,6 +512,8 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => {
 })
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
+  log(`mcp call_tool name=${req.params.name}`, req.params.arguments)
+
   if (req.params.name === 'status_update') {
     const args = (req.params.arguments ?? {}) as { text?: unknown }
     const text = typeof args.text === 'string' ? args.text.trim() : ''
@@ -512,6 +532,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     resetTimeout()
     const displayText = text.endsWith('...') ? text : `${text}...`
     broadcast(p, { status_update: { text: displayText } })
+    log(`status_update OK text=${JSON.stringify(text.slice(0, 120))}`)
     return {
       content: [
         { type: 'text', text: 'Status delivered to Mira. Continue working on the final answer.' },
@@ -520,13 +541,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
 
   if (req.params.name === 'help') {
-    const state = await currentUpdateState()
-    if (!canShowTunnelUrl(state)) {
-      return {
-        content: [{ type: 'text', text: TUNNEL_BLOCKED_MESSAGE }],
-      }
-    }
-
     const tunnelUrl = getTunnelUrl()
     const tunnelError = getTunnelError()
     let statusLine: string
@@ -637,26 +651,16 @@ log('mcp stdio connected')
 const shutdown = (reason: string) => {
   log(`shutdown reason=${reason}`)
   try { Bun.file(PID_FILE).text().then(t => { if (parseInt(t.trim()) === process.pid) writeFileSync(PID_FILE, '') }) } catch { /* best-effort */ }
-  process.exit(0)
+  void events.flush().finally(() => {
+    events.stop()
+    process.exit(0)
+  })
+  setTimeout(() => process.exit(0), 1_500)
 }
 process.stdin.on('end', () => shutdown('stdin end'))
 process.stdin.on('close', () => shutdown('stdin close'))
 process.on('SIGTERM', () => shutdown('SIGTERM'))
 process.on('SIGINT', () => shutdown('SIGINT'))
-
-// Free the port: if a previous Mira instance is still bound, kill it so we can bind.
-try {
-  const out = Bun.spawnSync(['lsof', '-ti', `tcp:${PORT}`]).stdout
-  const pids = new TextDecoder().decode(out).trim().split('\n').filter(Boolean)
-  for (const pid of pids) {
-    if (Number(pid) === process.pid) continue
-    log(`killing existing process on port ${PORT} pid=${pid}`)
-    try { process.kill(Number(pid), 'SIGKILL') } catch { /* ignore */ }
-  }
-  if (pids.length) Bun.sleepSync(150)
-} catch (err) {
-  log(`port preflight failed: ${(err as Error).message}`)
-}
 
 Bun.serve({
   port: PORT,
@@ -664,11 +668,9 @@ Bun.serve({
   idleTimeout: 0,
   async fetch(req) {
     const url = new URL(req.url)
+    const ua = req.headers.get('user-agent') ?? ''
+    log(`http ${req.method} ${url.pathname} ua=${ua.slice(0, 60)}`)
 
-    if (req.method === 'GET' && url.pathname === '/') {
-      return Response.json({ status: 'Server up. Enter the URL into the Mira App under the Claude Code integration', active: active !== null })
-    }
-    
     if (req.method === 'GET' && url.pathname === '/health') {
       return Response.json({ status: 'ok', active: active !== null })
     }
@@ -708,12 +710,14 @@ Bun.serve({
         backendBaseUrl,
         connectedAt: Date.now(),
       }
+      events.setConnection({ userId, accessToken, backendBaseUrl })
 
       void syncConversationsToMarkdown().catch((err) => {
-        log(`conversation sync failed: ${(err as Error).stack ?? (err as Error).message}`)
+        log(`conversation sync failed: ${(err as Error).message}`)
       })
 
       log(`connect OK user_id=${userId} backend=${backendBaseUrl} token_len=${accessToken.length}`)
+      emit('connect', { user_id: userId })
       return Response.json({
         status: 'connected',
         user_id: userId,
@@ -737,6 +741,7 @@ Bun.serve({
       const userId = connection?.userId
       connection = null
       log(`disconnect was_connected=${wasConnected} user_id=${userId ?? '(none)'}`)
+      void events.flush().finally(() => events.setConnection(null))
       return Response.json({ status: 'disconnected' })
     }
 
@@ -791,6 +796,8 @@ Bun.serve({
         include_in_tools_used: true,
       }
       broadcast(p, { tool_status: payload })
+      log(`tool_status ${state} tool=${toolName} call_id=${toolUseId ?? '(none)'} display=${JSON.stringify(display)}`)
+      if (state === 'started') emit('tool_call', { tool_name: toolName })
       return Response.json({ status: 'delivered' })
     }
 
@@ -883,19 +890,20 @@ Bun.serve({
 
 
       const { entry, response } = openPendingChat()
+      emit('chat_in', { text_len: userText.length })
       try {
-        log(`chat IN session_id=${entry.sessionId} chars=${userText.length}`)
         await mcp.notification({
           method: 'notifications/claude/channel',
           params: { content: userText, meta },
         })
+        log(`chat IN session_id=${entry.sessionId} chars=${userText.length}`)
 
         return new Response(responseToSse(entry, response), {
           headers: { 'Content-Type': 'text/event-stream' },
         })
       } catch (err) {
         cancelPendingChat(entry)
-        log(`chat failed err=${(err as Error).stack ?? (err as Error).message}`)
+        log(`chat failed err=${(err as Error).message}`)
         return Response.json({ error: { message: 'failed to send message to Claude' } }, { status: 500 })
       }
     }
@@ -905,6 +913,13 @@ Bun.serve({
 })
 
 log(`http listener up on http://127.0.0.1:${PORT}`)
+
+// Dev mode: auto-connect EventShipper to a local backend so telemetry
+// flows without needing the iOS app to call /connect.
+if (DEV_BACKEND_URL) {
+  events.setConnection({ userId: 'dev-plugin', accessToken: DEV_TOKEN, backendBaseUrl: DEV_BACKEND_URL })
+  log(`dev mode: EventShipper auto-connected to ${DEV_BACKEND_URL}`)
+}
 
 void currentUpdateState().catch((err) => {
   log(`plugin update check failed: ${(err as Error).message}`)
@@ -919,78 +934,16 @@ void openProvisionedTunnel({
   backendBaseUrl: TUNNEL_BACKEND_URL,
   log,
 })
-  .then(async () => {
+  .then(() => {
     const url = getTunnelUrl()
     const err = getTunnelError()
     if (url) {
-      const state = await currentUpdateState().catch(() => updateState)
-      if (canShowTunnelUrl(state)) {
-        try {
-          await mcp.notification({
-            method: 'notifications/claude/channel',
-            params: {
-              content: `Mira tunnel URL (paste in Mira iOS app → Integrations → Claude Code):\n${url}\n\nAfter echoing the tunnel URL above exactly as instructed, introduce yourself and briefly describe what you can do for the user (including access to past Mira conversations capabilities).`,
-            },
-          })
-          log(`tunnel URL pushed via channel url=${url}`)
-        } catch (notifyErr) {
-          log(`tunnel channel notify failed: ${(notifyErr as Error).message}`)
-        }
-      }
+      emit('tunnel_ready', { url })
     } else if (err) {
-      try {
-        await mcp.notification({
-          method: 'notifications/claude/channel',
-          params: { content: `Mira tunnel unavailable: ${err}` },
-        })
-      } catch { /* best-effort */ }
+      emit('tunnel_failed', { error: err }, 'error')
     }
   })
-  .catch(async (err) => {
-    const msg = (err as Error).message
-    log(`tunnel open failed: ${msg}`)
-    try {
-      await mcp.notification({
-        method: 'notifications/claude/channel',
-        params: { content: `Mira tunnel failed to start: ${msg}` },
-      })
-    } catch { /* best-effort */ }
+  .catch((err) => {
+    log(`tunnel open failed: ${(err as Error).message}`)
+    emit('tunnel_failed', { error: (err as Error).message }, 'error')
   })
-
-// Periodically check for plugin updates and notify Claude in-session (once per stale version).
-const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000 // every 5 minutes
-let lastNotifiedVersion: string | null = null
-setInterval(async () => {
-  try {
-    log(`update-check: running pluginRoot=${PLUGIN_ROOT}`)
-    const state = await checkPluginUpdateState({ pluginRoot: PLUGIN_ROOT, timeoutMs: 3_000 })
-    log(`update-check: local=${state.localVersion} remote=${state.remoteVersion} stale=${state.stale}`)
-    if (!canShowTunnelUrl(state)) {
-      if (lastNotifiedVersion === state.localVersion) {
-        log('update-check: already notified, skipping')
-        return
-      }
-      lastNotifiedVersion = state.localVersion
-      log('update-check: stale — attempting auto-update')
-      const result = autoUpdatePlugin()
-      log(`update-check: autoUpdate result ok=${result.ok} ${result.ok ? '' : (result as { ok: false; reason: string }).reason}`)
-      if (result.ok) {
-        await mcp.notification({
-          method: 'notifications/claude/channel',
-          params: {
-            content: 'Mira plugin updated in background ⚡ — restart Claude to apply the new version.',
-          },
-        })
-      } else {
-        await mcp.notification({
-          method: 'notifications/claude/channel',
-          params: {
-            content: `Mira plugin update available — run \`claude plugin update mira@mira-marketplace\` then restart.`,
-          },
-        })
-      }
-    }
-  } catch (err) {
-    log(`update-check: error — ${(err as Error).message}`)
-  }
-}, UPDATE_CHECK_INTERVAL_MS)
