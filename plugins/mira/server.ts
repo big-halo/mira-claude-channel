@@ -367,7 +367,7 @@ async function runStreamLifecycle(
       broadcast(p, { text: payload.text })
       broadcast(p, { sources: payload.sources })
       emitDone(p)
-      emit('chat_done', { text_len: payload.text.length })
+      emit('chat_done')
     }
   } catch (err) {
     const message = err instanceof ChatClosedError ? err.reason : 'failed'
@@ -804,7 +804,7 @@ Bun.serve({
         include_in_tools_used: true,
       }
       broadcast(p, { tool_status: payload })
-      if (state === 'started') emit('tool_call', { tool_name: toolName })
+
       return Response.json({ status: 'delivered' })
     }
 
@@ -897,7 +897,7 @@ Bun.serve({
 
 
       const { entry, response } = openPendingChat()
-      emit('chat_in', { text_len: userText.length })
+      emit('chat_in')
       try {
         log(`chat IN session_id=${entry.sessionId} chars=${userText.length}`)
         await mcp.notification({
