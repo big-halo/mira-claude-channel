@@ -890,13 +890,26 @@ Bun.serve({
         if (typeof loc.address === 'string' && loc.address.trim()) meta.user_address = loc.address
       }
 
+      // Build content: prepend conversation history when prior messages exist
+      const previousMessages = messages.slice(0, -1)
+      let notifyContent: string
+      if (previousMessages.length > 0) {
+        const historyLines = previousMessages.map(m => {
+          const speaker = (m.speaker ?? 0) >= 0 ? (firstName || 'User') : 'Mira'
+          const text = (m.content ?? m.text ?? '').toString()
+          return `${speaker}: ${text}`
+        })
+        notifyContent = `[Previous conversation]\n${historyLines.join('\n')}\n\n[Current message]\n${userText}`
+      } else {
+        notifyContent = userText
+      }
 
       const { entry, response } = openPendingChat()
       try {
-        log(`chat IN session_id=${entry.sessionId} chars=${userText.length}`)
+        log(`chat IN session_id=${entry.sessionId} chars=${userText.length} history=${previousMessages.length}`)
         await mcp.notification({
           method: 'notifications/claude/channel',
-          params: { content: userText, meta },
+          params: { content: notifyContent, meta },
         })
 
         return new Response(responseToSse(entry, response), {
