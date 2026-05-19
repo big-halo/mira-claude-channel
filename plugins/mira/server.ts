@@ -3,9 +3,10 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
-import { mkdirSync, writeFileSync, existsSync, appendFileSync } from 'fs'
+import { mkdirSync, writeFileSync, existsSync } from 'fs'
 import { openProvisionedTunnel, getTunnelUrl, getTunnelError } from './cloudflare'
 import { getOrCreateDevice } from './device'
+import { PluginEventShipper } from './events'
 import {
   appendUpdateNotice,
   autoUpdatePlugin,
@@ -14,7 +15,6 @@ import {
   TUNNEL_BLOCKED_MESSAGE,
   type UpdateState,
 } from './plugin_update'
-import { miraPath } from './paths'
 import { join } from 'path'
 import { homedir } from 'os'
 
@@ -29,20 +29,14 @@ const TUNNEL_BACKEND_URL = 'https://glass-staging.thebighalo.com'
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT ?? import.meta.dir
 const UPDATE_CHECK_TTL_MS = 5 * 60_000
 
-const LOG_FILE = process.env.MIRA_LOG ?? miraPath('mira.log')
-
 function log(msg: string, extra?: unknown) {
   const line =
     `[${new Date().toISOString()}] ${msg}` +
     (extra !== undefined ? ` ${safeStringify(extra)}` : '') +
     '\n'
+  // The plugin launch command redirects stderr to /tmp/mira.log, catching both
+  // explicit logs and runtime errors that bypass this helper.
   process.stderr.write(line)
-  try {
-    mkdirSync(miraPath(), { recursive: true })
-    appendFileSync(LOG_FILE, line)
-  } catch {
-    // best-effort; never crash on logging
-  }
 }
 function safeStringify(value: unknown): string {
   try {
@@ -50,6 +44,11 @@ function safeStringify(value: unknown): string {
   } catch {
     return String(value)
   }
+}
+
+const events = new PluginEventShipper({ log })
+function emit(kind: string, payload: Record<string, unknown> = {}, level: 'info' | 'warn' | 'error' = 'info') {
+  events.emit(kind, payload, level)
 }
 
 function basename(p: string): string {
@@ -368,6 +367,7 @@ async function runStreamLifecycle(
       broadcast(p, { text: payload.text })
       broadcast(p, { sources: payload.sources })
       emitDone(p)
+      emit('chat_done')
     }
   } catch (err) {
     const message = err instanceof ChatClosedError ? err.reason : 'failed'
@@ -644,7 +644,7 @@ log('mcp stdio connected')
 const shutdown = (reason: string) => {
   log(`shutdown reason=${reason}`)
   try { Bun.file(PID_FILE).text().then(t => { if (parseInt(t.trim()) === process.pid) writeFileSync(PID_FILE, '') }) } catch { /* best-effort */ }
-  process.exit(0)
+  setTimeout(() => process.exit(0), 200)
 }
 process.stdin.on('end', () => shutdown('stdin end'))
 process.stdin.on('close', () => shutdown('stdin close'))
@@ -722,6 +722,8 @@ Bun.serve({
         log(`conversation sync failed: ${(err as Error).stack ?? (err as Error).message}`)
       })
 
+      events.setAccessToken(accessToken)
+      emit('connect', { user_id: userId })
       log(`connect OK user_id=${userId} backend=${backendBaseUrl} token_len=${accessToken.length}`)
       return Response.json({
         status: 'connected',
@@ -746,6 +748,8 @@ Bun.serve({
       const userId = connection?.userId
       connection = null
       log(`disconnect was_connected=${wasConnected} user_id=${userId ?? '(none)'}`)
+      emit('disconnect', { user_id: userId ?? null })
+      events.setAccessToken(undefined)
       return Response.json({ status: 'disconnected' })
     }
 
@@ -800,6 +804,7 @@ Bun.serve({
         include_in_tools_used: true,
       }
       broadcast(p, { tool_status: payload })
+
       return Response.json({ status: 'delivered' })
     }
 
@@ -903,6 +908,7 @@ Bun.serve({
       }
 
       const { entry, response } = openPendingChat()
+      emit('chat_in')
       try {
         log(`chat IN session_id=${entry.sessionId} chars=${userText.length} prior_user_msgs=${priorUserMessages.length}`)
         await mcp.notification({
@@ -936,6 +942,8 @@ void currentUpdateState().catch((err) => {
 
 // Provision the persistent Cloudflare tunnel on boot.
 const device = getOrCreateDevice()
+events.setDeviceId(device.device_id)
+emit('boot', { device_label: device.device_label })
 log(`device id=${device.device_id} label=${device.device_label}`)
 void openProvisionedTunnel({
   deviceId: device.device_id,
@@ -956,6 +964,7 @@ void openProvisionedTunnel({
               content: `Mira tunnel URL (paste in Mira iOS app → Integrations → Claude Code):\n${url}\n\nAfter echoing the tunnel URL above exactly as instructed, introduce yourself and briefly describe what you can do for the user (including access to past Mira conversations capabilities).`,
             },
           })
+          emit('tunnel_ready', { url })
           log(`tunnel URL pushed via channel url=${url}`)
         } catch (notifyErr) {
           log(`tunnel channel notify failed: ${(notifyErr as Error).message}`)
@@ -973,6 +982,7 @@ void openProvisionedTunnel({
   .catch(async (err) => {
     const msg = (err as Error).message
     log(`tunnel open failed: ${msg}`)
+    emit('tunnel_failed', { error: msg }, 'error')
     try {
       await mcp.notification({
         method: 'notifications/claude/channel',
