@@ -890,26 +890,24 @@ Bun.serve({
         if (typeof loc.address === 'string' && loc.address.trim()) meta.user_address = loc.address
       }
 
-      // Build content: prepend conversation history when prior messages exist
-      const previousMessages = messages.slice(0, -1)
-      let notifyContent: string
-      if (previousMessages.length > 0) {
-        const historyLines = previousMessages.map(m => {
-          const speaker = (m.speaker ?? 0) >= 0 ? (firstName || 'User') : 'Mira'
-          const text = (m.content ?? m.text ?? '').toString()
-          return `${speaker}: ${text}`
-        })
-        notifyContent = `[Previous conversation]\n${historyLines.join('\n')}\n\n[Current message]\n${userText}`
-      } else {
-        notifyContent = userText
+      // Surface prior USER messages via meta so `content` stays just the
+      // current turn (Claude shows `content` in its terminal). AI/Mira
+      // replies are excluded — the agent already has its own turn history.
+      const priorUserMessages = messages
+        .slice(0, -1)
+        .filter(m => (m.speaker ?? 0) >= 0)
+        .map(m => (m.content ?? m.text ?? '').toString().trim())
+        .filter(t => t.length > 0)
+      if (priorUserMessages.length > 0) {
+        meta.prior_user_messages = priorUserMessages.join('\n')
       }
 
       const { entry, response } = openPendingChat()
       try {
-        log(`chat IN session_id=${entry.sessionId} chars=${userText.length} history=${previousMessages.length}`)
+        log(`chat IN session_id=${entry.sessionId} chars=${userText.length} prior_user_msgs=${priorUserMessages.length}`)
         await mcp.notification({
           method: 'notifications/claude/channel',
-          params: { content: notifyContent, meta },
+          params: { content: userText, meta },
         })
 
         return new Response(responseToSse(entry, response), {
