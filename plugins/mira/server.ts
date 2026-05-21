@@ -25,7 +25,7 @@ const REQUEST_TIMEOUT_MS = 120_000
 // signal the iOS stall watchdog uses to detect silent socket deaths — must
 // stay well under the iOS watchdog threshold (currently 6s).
 const SSE_HEARTBEAT_MS = Number(process.env.MIRA_SSE_HEARTBEAT_MS ?? 2_000)
-const TUNNEL_BACKEND_URL = 'https://glass-staging.thebighalo.com'
+const TUNNEL_BACKEND_URL = "https://glass-prod.thebighalo.com"
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT ?? import.meta.dir
 const UPDATE_CHECK_TTL_MS = 5 * 60_000
 
@@ -132,8 +132,13 @@ function sessionMarkdownPath(userDir: string, session: BackendSession): string {
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-+|-+$/g, '')
       .slice(0, 80) || 'untitled'
-  const date = (session.start_time ?? 'unknown-date').slice(0, 10)
-  return join(userDir, `${session.id}-${title}-${date}.md`)
+  const raw = session.start_time ?? ''
+  const date = raw.slice(0, 10) || 'unknown-date'
+  const timePart = raw.length >= 16
+    ? raw.slice(11, 16).replace(':', '-')
+    : null
+  const datetime = timePart ? `${date}-${timePart}` : date
+  return join(userDir, `${datetime}-${title}-${session.id}.md`)
 }
 
 async function syncConversationsToMarkdown() {
