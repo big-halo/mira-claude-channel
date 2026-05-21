@@ -6,7 +6,6 @@ import { z } from 'zod'
 import { mkdirSync, writeFileSync, existsSync } from 'fs'
 import { openProvisionedTunnel, getTunnelUrl, getTunnelError } from './cloudflare'
 import { getOrCreateDevice } from './device'
-import { PluginEventShipper } from './events'
 import {
   appendUpdateNotice,
   autoUpdatePlugin,
@@ -44,11 +43,6 @@ function safeStringify(value: unknown): string {
   } catch {
     return String(value)
   }
-}
-
-const events = new PluginEventShipper({ log })
-function emit(kind: string, payload: Record<string, unknown> = {}, level: 'info' | 'warn' | 'error' = 'info') {
-  events.emit(kind, payload, level)
 }
 
 function basename(p: string): string {
@@ -368,7 +362,6 @@ async function runStreamLifecycle(
       broadcast(p, { text: payload.text })
       broadcast(p, { sources: payload.sources })
       emitDone(p)
-      emit('chat_done')
     }
   } catch (err) {
     const message = err instanceof ChatClosedError ? err.reason : 'failed'
@@ -723,8 +716,6 @@ Bun.serve({
         log(`conversation sync failed: ${(err as Error).stack ?? (err as Error).message}`)
       })
 
-      events.setAccessToken(accessToken)
-      emit('connect', { user_id: userId })
       log(`connect OK user_id=${userId} backend=${backendBaseUrl} token_len=${accessToken.length}`)
       return Response.json({
         status: 'connected',
@@ -749,8 +740,6 @@ Bun.serve({
       const userId = connection?.userId
       connection = null
       log(`disconnect was_connected=${wasConnected} user_id=${userId ?? '(none)'}`)
-      emit('disconnect', { user_id: userId ?? null })
-      events.setAccessToken(undefined)
       return Response.json({ status: 'disconnected' })
     }
 
@@ -909,7 +898,6 @@ Bun.serve({
       }
 
       const { entry, response } = openPendingChat()
-      emit('chat_in')
       try {
         log(`chat IN session_id=${entry.sessionId} chars=${userText.length} prior_user_msgs=${priorUserMessages.length}`)
         await mcp.notification({
@@ -943,8 +931,6 @@ void currentUpdateState().catch((err) => {
 
 // Provision the persistent Cloudflare tunnel on boot.
 const device = getOrCreateDevice()
-events.setDeviceId(device.device_id)
-emit('boot', { device_label: device.device_label })
 log(`device id=${device.device_id} label=${device.device_label}`)
 void openProvisionedTunnel({
   deviceId: device.device_id,
@@ -965,7 +951,6 @@ void openProvisionedTunnel({
               content: `Mira tunnel URL (paste in Mira iOS app → Integrations → Claude Code):\n${url}\n\nAfter echoing the tunnel URL above exactly as instructed, introduce yourself and briefly describe what you can do for the user (including access to past Mira conversations capabilities).`,
             },
           })
-          emit('tunnel_ready', { url })
           log(`tunnel URL pushed via channel url=${url}`)
         } catch (notifyErr) {
           log(`tunnel channel notify failed: ${(notifyErr as Error).message}`)
@@ -983,7 +968,6 @@ void openProvisionedTunnel({
   .catch(async (err) => {
     const msg = (err as Error).message
     log(`tunnel open failed: ${msg}`)
-    emit('tunnel_failed', { error: msg }, 'error')
     try {
       await mcp.notification({
         method: 'notifications/claude/channel',
