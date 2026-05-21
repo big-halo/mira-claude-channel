@@ -132,12 +132,8 @@ function sessionMarkdownPath(userDir: string, session: BackendSession): string {
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-+|-+$/g, '')
       .slice(0, 80) || 'untitled'
-  const raw = session.start_time ?? ''
-  const date = raw.slice(0, 10) || 'unknown-date'
-  const timePart = raw.length >= 16
-    ? raw.slice(11, 16).replace(':', '-')
-    : null
-  const datetime = timePart ? `${date}-${timePart}` : date
+  const raw = session.start_time!
+  const datetime = `${raw.slice(0, 10)}-${raw.slice(11, 16).replace(':', '-')}`
   return join(userDir, `${datetime}-${title}-${session.id}.md`)
 }
 
