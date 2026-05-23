@@ -1,0 +1,55 @@
+name: Publish Mira Plugin
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "plugins/mira/**"
+      - ".github/workflows/publish-mira-plugin.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Package plugin
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          tar \
+            --exclude='node_modules' \
+            --exclude='.DS_Store' \
+            -czf dist/mira.tgz \
+            -C plugins/mira \
+            .
+          cp plugins/mira/package.json dist/package.json
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh release view mira-plugin-latest >/dev/null 2>&1; then
+            gh release create mira-plugin-latest \
+              --title "Mira Plugin Latest" \
+              --notes "Latest packaged Mira Claude Code plugin." \
+              --latest
+          fi
+
+          gh release edit mira-plugin-latest \
+            --title "Mira Plugin Latest" \
+            --notes "Latest packaged Mira Claude Code plugin.\n\nCommit: $GITHUB_SHA" \
+            --latest
+
+          gh release upload mira-plugin-latest \
+            dist/mira.tgz \
+            dist/package.json \
+            --clobber
