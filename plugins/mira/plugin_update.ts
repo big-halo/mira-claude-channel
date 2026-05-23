@@ -1,18 +1,23 @@
 import { join } from 'path'
-import { readFileSync } from 'fs'
+import { homedir } from 'os'
+import { mkdirSync, readFileSync, rmSync } from 'fs'
 
 const MARKETPLACE_NAME = 'mira-marketplace'
 const PLUGIN_NAME = 'mira'
-const REMOTE_PACKAGE_BASE_URL =
-  'https://api.github.com/repos/big-halo/mira-claude-channel/contents/plugins/mira/package.json'
+const RELEASE_BASE_URL =
+  process.env.MIRA_PLUGIN_RELEASE_BASE_URL ??
+  'https://github.com/big-halo/mira-claude-channel/releases/latest/download'
+const REMOTE_PACKAGE_URL = `${RELEASE_BASE_URL}/package.json`
+const REMOTE_ARCHIVE_URL = `${RELEASE_BASE_URL}/mira.tgz`
+const LOCAL_PLUGIN_DIR = `${homedir()}/.local/share/mira/mira`
 const DEFAULT_UPDATE_CHECK_TIMEOUT_MS = 3_000
 
 export const UPDATE_NOTICE =
-  'Plugin update required: /plugin → Marketplaces → mira-marketplace → update to latest + enable auto-update, then run /reload-plugins'
+  'Plugin update required: run the Mira installer again, then restart Claude'
 
 export const TUNNEL_BLOCKED_MESSAGE =
   'Mira tunnel URL: not available — plugin update required.\n' +
-  'To get your URL: /plugin → Marketplaces → mira-marketplace → update to latest + enable auto-update, then run /reload-plugins'
+  'To get your URL: run the Mira installer again, then restart Claude'
 
 export const AUTO_UPDATE_RELOAD_MESSAGE =
   'Mira plugin was out of date — auto-updated in the background.\n' +
@@ -22,10 +27,46 @@ export type AutoUpdateResult = { ok: true } | { ok: false; reason: string }
 
 export function autoUpdatePlugin(): AutoUpdateResult {
   try {
+    const tmpDir = `${homedir()}/.local/share/mira/.update-${Date.now()}`
+    mkdirSync(tmpDir, { recursive: true })
+
+    const archivePath = `${tmpDir}/mira-plugin.tgz`
+    let result = Bun.spawnSync(['curl', '-fsSL', REMOTE_ARCHIVE_URL, '-o', archivePath], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    if (result.exitCode !== 0) {
+      const stderr = new TextDecoder().decode(result.stderr).trim()
+      rmSync(tmpDir, { recursive: true, force: true })
+      return { ok: false, reason: stderr || `curl exit ${result.exitCode}` }
+    }
+
+    rmSync(LOCAL_PLUGIN_DIR, { recursive: true, force: true })
+    mkdirSync(LOCAL_PLUGIN_DIR, { recursive: true })
+    result = Bun.spawnSync(['tar', '-xzf', archivePath, '-C', LOCAL_PLUGIN_DIR], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    rmSync(tmpDir, { recursive: true, force: true })
+    if (result.exitCode !== 0) {
+      const stderr = new TextDecoder().decode(result.stderr).trim()
+      return { ok: false, reason: stderr || `tar exit ${result.exitCode}` }
+    }
+
+    result = Bun.spawnSync(['bun', 'install'], {
+      cwd: LOCAL_PLUGIN_DIR,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    if (result.exitCode !== 0) {
+      const stderr = new TextDecoder().decode(result.stderr).trim()
+      return { ok: false, reason: stderr || `bun install exit ${result.exitCode}` }
+    }
+
     const claudeBin =
       process.env.CLAUDE_BIN ??
       `${process.env.HOME}/.local/bin/claude`
-    const result = Bun.spawnSync(
+    result = Bun.spawnSync(
       [claudeBin, 'plugin', 'update', `${PLUGIN_NAME}@${MARKETPLACE_NAME}`],
       { stdout: 'pipe', stderr: 'pipe' },
     )
@@ -88,19 +129,11 @@ export async function checkPluginUpdateState({
 }): Promise<UpdateState> {
   const localVersion = localPluginVersion(pluginRoot)
 
-  const res = await fetchWithTimeout(`${REMOTE_PACKAGE_BASE_URL}?t=${Date.now()}`, timeoutMs)
+  const res = await fetchWithTimeout(`${REMOTE_PACKAGE_URL}?t=${Date.now()}`, timeoutMs)
   if (!res.ok) throw new Error(`remote_package_http_${res.status}`)
 
   const data = await res.json() as { content?: string; version?: unknown }
-  let remoteVersion: string | null = null
-  if (typeof data.content === 'string') {
-    // GitHub API returns base64-encoded file content
-    const decoded = Buffer.from(data.content.replace(/\n/g, ''), 'base64').toString('utf8')
-    const pkg = JSON.parse(decoded) as { version?: unknown }
-    remoteVersion = typeof pkg.version === 'string' ? pkg.version : null
-  } else if (typeof data.version === 'string') {
-    remoteVersion = data.version
-  }
+  const remoteVersion = typeof data.version === 'string' ? data.version : null
 
   const stale =
     localVersion !== null &&

@@ -6,37 +6,31 @@ When the iOS app's "Claude Code" toggle is ON, every message the user sends from
 
 ## Install
 
-This is a development-stage channel, so it isn't on Anthropic's approved allowlist. You'll start Claude Code with `--dangerously-load-development-channels` to load it.
+The Mira one-line installer installs cloudflared, the marketplace, this plugin, its dependencies, and a `mira` command that starts Claude Code with this channel.
 
-1. Add the marketplace, then install the plugin:
-
-   ```sh
-   claude
-   # inside the Claude Code session:
-   /plugin marketplace add big-halo/mira-claude-channel
-   /plugin install mira@mira-marketplace
-   ```
-
-   Optional, but recommended: enable plugin auto-updates for this marketplace.
-   Third-party marketplaces are not auto-updated by default.
-
-   ```text
-   /plugin → Marketplaces → mira-marketplace → Enable auto-update
-   ```
-
-   This marketplace intentionally does not set an explicit plugin `version`, so
-   Claude Code uses the plugin source's git commit SHA for update detection.
-   When the `main` branch changes, the next marketplace auto-update can install
-   the new plugin cache. If Claude Code reports that a plugin updated, run
-   `/reload-plugins` or restart the session.
-
-2. Quit, then relaunch Claude Code with the development-channels flag:
+1. Run the installer:
 
    ```sh
-   claude --dangerously-load-development-channels plugin:mira@mira-marketplace
+   bash -c "$(curl -fsSL https://glass-prod.thebighalo.com/claude-install)"
    ```
 
-   Confirm the prompt. Claude Code will spawn `server.ts` over stdio and the HTTP listener will start on `127.0.0.1:3141` automatically. You don't run `bun` yourself.
+   The installed plugin checks the latest GitHub Release artifact for updates
+   and can refresh its local plugin files in the background. Restart Claude
+   after an update applies.
+
+2. Start Claude Code with Mira:
+
+   ```sh
+   mira
+   ```
+
+   Or skip permission prompts:
+
+   ```sh
+   mira --yolo
+   ```
+
+   Claude Code will spawn `server.ts` over stdio and the HTTP listener will start on `127.0.0.1:3141` automatically. You don't run `bun` yourself.
 
 3. In the iOS app, open Settings → Claude Code → toggle **Local Integration** ON.
 

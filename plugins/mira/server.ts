@@ -549,8 +549,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
             `  2. Paste the URL above\n` +
             `  3. Send a message — it should arrive here as a channel notification\n\n` +
             `If messages from the iOS app aren't reaching Claude, restart Claude Code with:\n` +
-            `  claude --dangerously-load-development-channels plugin:mira@mira-marketplace\n` +
-            `That flag is required for Claude Code to surface inbound channel notifications from this plugin.`,
+            `  mira\n` +
+            `Use "mira --yolo" if you want Claude Code to skip permission prompts.`,
         },
       ],
     }
@@ -1004,7 +1004,7 @@ setInterval(async () => {
         await mcp.notification({
           method: 'notifications/claude/channel',
           params: {
-            content: `Mira plugin update available — run \`claude plugin update mira@mira-marketplace\` then restart.`,
+            content: 'Mira plugin update available — rerun the Mira installer, then restart Claude.',
           },
         })
       }

