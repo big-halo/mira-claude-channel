@@ -1,6 +1,6 @@
 import { join } from 'path'
 import { homedir } from 'os'
-import { mkdirSync, readFileSync, rmSync } from 'fs'
+import { mkdirSync, readFileSync, rmSync, existsSync } from 'fs'
 
 const MARKETPLACE_NAME = 'mira-marketplace'
 const PLUGIN_NAME = 'mira'
@@ -24,6 +24,17 @@ export const AUTO_UPDATE_RELOAD_MESSAGE =
   'Run /reload-plugins now to apply the update and get your tunnel URL.'
 
 export type AutoUpdateResult = { ok: true } | { ok: false; reason: string }
+
+function resolveClaudeBin(): string | null {
+  if (process.env.CLAUDE_BIN) return process.env.CLAUDE_BIN
+  const which = Bun.spawnSync(['which', 'claude'], { stdout: 'pipe', stderr: 'pipe' })
+  if (which.exitCode === 0) {
+    const path = new TextDecoder().decode(which.stdout).trim()
+    if (path) return path
+  }
+  const fallback = `${process.env.HOME}/.local/bin/claude`
+  return existsSync(fallback) ? fallback : null
+}
 
 export function autoUpdatePlugin(): AutoUpdateResult {
   try {
@@ -63,9 +74,10 @@ export function autoUpdatePlugin(): AutoUpdateResult {
       return { ok: false, reason: stderr || `bun install exit ${result.exitCode}` }
     }
 
-    const claudeBin =
-      process.env.CLAUDE_BIN ??
-      `${process.env.HOME}/.local/bin/claude`
+    const claudeBin = resolveClaudeBin()
+    if (!claudeBin) {
+      return { ok: false, reason: 'claude binary not found on PATH' }
+    }
     result = Bun.spawnSync(
       [claudeBin, 'plugin', 'update', `${PLUGIN_NAME}@${MARKETPLACE_NAME}`],
       { stdout: 'pipe', stderr: 'pipe' },
