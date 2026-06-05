@@ -1,6 +1,6 @@
 {
   "name": "mira",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Bridges chat from the Mira iOS app into Claude Code",
   "mcpServers": {
     "mira": {
