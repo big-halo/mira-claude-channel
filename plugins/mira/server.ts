@@ -955,6 +955,20 @@ void openProvisionedTunnel({
         } catch (notifyErr) {
           log(`tunnel channel notify failed: ${(notifyErr as Error).message}`)
         }
+      } else {
+        // Plugin is stale: the tunnel URL is intentionally withheld. Without
+        // this branch the boot push sent nothing at all, leaving the user in
+        // total silence — no URL, no error, no way to know they must update.
+        // Surface the blocked/update message so the rescue path is reachable.
+        try {
+          await mcp.notification({
+            method: 'notifications/claude/channel',
+            params: { content: TUNNEL_BLOCKED_MESSAGE },
+          })
+          log('tunnel URL suppressed (stale) — pushed TUNNEL_BLOCKED_MESSAGE')
+        } catch (notifyErr) {
+          log(`blocked-message notify failed: ${(notifyErr as Error).message}`)
+        }
       }
     } else if (err) {
       try {
