@@ -6,14 +6,6 @@ import { z } from 'zod'
 import { mkdirSync, writeFileSync, existsSync } from 'fs'
 import { openProvisionedTunnel, getTunnelUrl, getTunnelError } from './cloudflare'
 import { getOrCreateDevice } from './device'
-import {
-  appendUpdateNotice,
-  autoUpdatePlugin,
-  canShowTunnelUrl,
-  checkPluginUpdateState,
-  TUNNEL_BLOCKED_MESSAGE,
-  type UpdateState,
-} from './plugin_update'
 import { join } from 'path'
 import { homedir } from 'os'
 
@@ -25,8 +17,6 @@ const REQUEST_TIMEOUT_MS = 120_000
 // stay well under the iOS watchdog threshold (currently 6s).
 const SSE_HEARTBEAT_MS = Number(process.env.MIRA_SSE_HEARTBEAT_MS ?? 2_000)
 const TUNNEL_BACKEND_URL = "https://glass-prod.thebighalo.com"
-const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT ?? import.meta.dir
-const UPDATE_CHECK_TTL_MS = 5 * 60_000
 
 function log(msg: string, extra?: unknown) {
   const line =
@@ -48,50 +38,6 @@ function safeStringify(value: unknown): string {
 function basename(p: string): string {
   const i = p.lastIndexOf('/')
   return i >= 0 ? p.slice(i + 1) : p
-}
-
-let updateState: UpdateState = {
-  checkedAt: 0,
-  stale: false,
-  localVersion: null,
-  remoteVersion: null,
-}
-let updateCheckInFlight: Promise<UpdateState> | null = null
-
-async function refreshUpdateState(): Promise<UpdateState> {
-  updateState = await checkPluginUpdateState({ pluginRoot: PLUGIN_ROOT })
-  log(
-    `plugin update check local=${updateState.localVersion ?? '(unknown)'} ` +
-      `remote=${updateState.remoteVersion ?? '(unknown)'} stale=${updateState.stale}`,
-  )
-  return updateState
-}
-
-async function currentUpdateState(): Promise<UpdateState> {
-  const now = Date.now()
-  if (now - updateState.checkedAt < UPDATE_CHECK_TTL_MS) return updateState
-
-  if (!updateCheckInFlight) {
-    updateCheckInFlight = refreshUpdateState()
-      .catch((err) => {
-        log(`plugin update check failed: ${(err as Error).message}`)
-        updateState = {
-          ...updateState,
-          checkedAt: Date.now(),
-        }
-        return updateState
-      })
-      .finally(() => {
-        updateCheckInFlight = null
-      })
-  }
-
-  return updateCheckInFlight
-}
-
-async function withUpdateNotice(text: string): Promise<string> {
-  const state = await currentUpdateState()
-  return appendUpdateNotice(text, state)
 }
 
 // Generic "Tool: <hint>" formatter. We don't hardcode per-tool rules; instead
@@ -521,13 +467,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
 
   if (req.params.name === 'help') {
-    const state = await currentUpdateState()
-    if (!canShowTunnelUrl(state)) {
-      return {
-        content: [{ type: 'text', text: TUNNEL_BLOCKED_MESSAGE }],
-      }
-    }
-
     const tunnelUrl = getTunnelUrl()
     const tunnelError = getTunnelError()
     let statusLine: string
@@ -819,10 +758,9 @@ Bun.serve({
         return Response.json({ status: 'ignored', reason: 'no_active_chat' })
       }
 
-      const responseText = await withUpdateNotice(text)
       active = null
       clearTimeout(p.timer)
-      p.resolve({ text: responseText, sources: [], debug: null })
+      p.resolve({ text, sources: [], debug: null })
       return Response.json({ status: 'delivered' })
     }
 
@@ -925,10 +863,6 @@ Bun.serve({
 
 log(`http listener up on http://127.0.0.1:${PORT}`)
 
-void currentUpdateState().catch((err) => {
-  log(`plugin update check failed: ${(err as Error).message}`)
-})
-
 // Provision the persistent Cloudflare tunnel on boot.
 const device = getOrCreateDevice()
 log(`device id=${device.device_id} label=${device.device_label}`)
@@ -942,33 +876,16 @@ void openProvisionedTunnel({
     const url = getTunnelUrl()
     const err = getTunnelError()
     if (url) {
-      const state = await currentUpdateState().catch(() => updateState)
-      if (canShowTunnelUrl(state)) {
-        try {
-          await mcp.notification({
-            method: 'notifications/claude/channel',
-            params: {
-              content: `Mira tunnel URL (paste in Mira iOS app → Integrations → Claude Code):\n${url}\n\nAfter echoing the tunnel URL above exactly as instructed, introduce yourself and briefly describe what you can do for the user (including access to past Mira conversations capabilities).`,
-            },
-          })
-          log(`tunnel URL pushed via channel url=${url}`)
-        } catch (notifyErr) {
-          log(`tunnel channel notify failed: ${(notifyErr as Error).message}`)
-        }
-      } else {
-        // Plugin is stale: the tunnel URL is intentionally withheld. Without
-        // this branch the boot push sent nothing at all, leaving the user in
-        // total silence — no URL, no error, no way to know they must update.
-        // Surface the blocked/update message so the rescue path is reachable.
-        try {
-          await mcp.notification({
-            method: 'notifications/claude/channel',
-            params: { content: TUNNEL_BLOCKED_MESSAGE },
-          })
-          log('tunnel URL suppressed (stale) — pushed TUNNEL_BLOCKED_MESSAGE')
-        } catch (notifyErr) {
-          log(`blocked-message notify failed: ${(notifyErr as Error).message}`)
-        }
+      try {
+        await mcp.notification({
+          method: 'notifications/claude/channel',
+          params: {
+            content: `Mira tunnel URL (paste in Mira iOS app → Integrations → Claude Code):\n${url}\n\nAfter echoing the tunnel URL above exactly as instructed, introduce yourself and briefly describe what you can do for the user (including access to past Mira conversations capabilities).`,
+          },
+        })
+        log(`tunnel URL pushed via channel url=${url}`)
+      } catch (notifyErr) {
+        log(`tunnel channel notify failed: ${(notifyErr as Error).message}`)
       }
     } else if (err) {
       try {
@@ -989,41 +906,3 @@ void openProvisionedTunnel({
       })
     } catch { /* best-effort */ }
   })
-
-// Periodically check for plugin updates and notify Claude in-session (once per stale version).
-const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000 // every 5 minutes
-let lastNotifiedVersion: string | null = null
-setInterval(async () => {
-  try {
-    log(`update-check: running pluginRoot=${PLUGIN_ROOT}`)
-    const state = await checkPluginUpdateState({ pluginRoot: PLUGIN_ROOT, timeoutMs: 3_000 })
-    log(`update-check: local=${state.localVersion} remote=${state.remoteVersion} stale=${state.stale}`)
-    if (!canShowTunnelUrl(state)) {
-      if (lastNotifiedVersion === state.localVersion) {
-        log('update-check: already notified, skipping')
-        return
-      }
-      lastNotifiedVersion = state.localVersion
-      log('update-check: stale — attempting auto-update')
-      const result = autoUpdatePlugin()
-      log(`update-check: autoUpdate result ok=${result.ok} ${result.ok ? '' : (result as { ok: false; reason: string }).reason}`)
-      if (result.ok) {
-        await mcp.notification({
-          method: 'notifications/claude/channel',
-          params: {
-            content: 'Mira plugin updated in background ⚡ — restart Claude to apply the new version.',
-          },
-        })
-      } else {
-        await mcp.notification({
-          method: 'notifications/claude/channel',
-          params: {
-            content: 'Mira plugin update available — rerun the Mira installer, then restart Claude.',
-          },
-        })
-      }
-    }
-  } catch (err) {
-    log(`update-check: error — ${(err as Error).message}`)
-  }
-}, UPDATE_CHECK_INTERVAL_MS)
