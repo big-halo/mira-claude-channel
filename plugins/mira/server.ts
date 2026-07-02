@@ -3,7 +3,8 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
-import { mkdirSync, writeFileSync, existsSync } from 'fs'
+import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'fs'
+import { miraPath } from './paths'
 import { openProvisionedTunnel, getTunnelUrl, getTunnelError } from './cloudflare'
 import { getOrCreateDevice } from './device'
 import { join } from 'path'
@@ -17,6 +18,56 @@ const REQUEST_TIMEOUT_MS = 120_000
 // stay well under the iOS watchdog threshold (currently 6s).
 const SSE_HEARTBEAT_MS = Number(process.env.MIRA_SSE_HEARTBEAT_MS ?? 2_000)
 const TUNNEL_BACKEND_URL = "https://glass-prod.thebighalo.com"
+
+// User's IANA timezone for rendering synced transcript timestamps in local time.
+const TZ_FILE = miraPath('user.tz')
+function hostTimezone(): string | null {
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || null } catch { return null }
+}
+// Seed from the last persisted user_timezone, else the host machine's tz (the plugin runs on the
+// user's laptop, so it's almost always right); a live /api/chat user_timezone overrides it.
+let lastKnownTimezone: string | null = (() => {
+  try {
+    const persisted = readFileSync(TZ_FILE, 'utf8').trim()
+    if (persisted) return persisted
+  } catch { /* no persisted tz yet */ }
+  return hostTimezone()
+})()
+
+function rememberUserTimezone(tz: string): void {
+  const clean = tz.trim()
+  if (!clean || clean === lastKnownTimezone) return
+  lastKnownTimezone = clean
+  try {
+    mkdirSync(miraPath(), { recursive: true })
+    writeFileSync(TZ_FILE, clean)
+  } catch (err) {
+    log(`failed to persist user timezone: ${(err as Error).message}`)
+  }
+}
+
+// UTC ISO timestamp -> "YYYY-MM-DD HH:mm:ss ZZZ" in tz; raw string if tz unknown or input unparseable.
+function formatTimestampLocal(iso: string | null | undefined, tz: string | null): string {
+  if (!iso) return '(no time)'
+  if (!tz) return iso
+  const date = new Date(iso)
+  if (isNaN(date.getTime())) return iso
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: tz,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hour12: false,
+      timeZoneName: 'short',
+    }).formatToParts(date)
+    const get = (t: string) => parts.find((p) => p.type === t)?.value ?? ''
+    const zone = get('timeZoneName')
+    return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')}${zone ? ' ' + zone : ''}`
+  } catch (err) {
+    log(`failed to format timestamp in tz=${tz}: ${(err as Error).message}`)
+    return iso
+  }
+}
 
 function log(msg: string, extra?: unknown) {
   const line =
@@ -89,6 +140,7 @@ async function syncConversationsToMarkdown() {
   const sessions = data.sessions ?? []
   const userDir = join(homedir(), '.mira', connection.userId)
   mkdirSync(userDir, { recursive: true })
+  const tz = lastKnownTimezone
   for (const session of sessions) {
     const path = sessionMarkdownPath(userDir, session)
     if (existsSync(path)) {
@@ -108,12 +160,12 @@ async function syncConversationsToMarkdown() {
       `# ${detail.title?.trim() || '(untitled)'}`,
       '',
       `Session ID: ${detail.id}`,
-      `Time: ${detail.start_time ?? '(no start time)'} -> ${detail.end_time ?? '(no end time)'}`,
+      `Time: ${formatTimestampLocal(detail.start_time, tz)} -> ${detail.end_time ? formatTimestampLocal(detail.end_time, tz) : '(no end time)'}`,
       detail.summary?.trim() ? `Summary: ${detail.summary.trim()}` : null,
       '',
       '## Transcript',
       '',
-      ...messages.map((m) => `[${m.timestamp}] speaker ${m.speaker}: ${m.text}`),
+      ...messages.map((m) => `[${formatTimestampLocal(m.timestamp, tz)}] speaker ${m.speaker}: ${m.text}`),
       '',
     ].filter(Boolean).join('\n')
     writeFileSync(path, markdown, 'utf8')
@@ -810,7 +862,10 @@ Bun.serve({
 
       const meta: Record<string, string> = {}
       if (typeof body?.user_local_time === 'string') meta.user_local_time = body.user_local_time
-      if (typeof body?.user_timezone === 'string') meta.user_timezone = body.user_timezone
+      if (typeof body?.user_timezone === 'string') {
+        meta.user_timezone = body.user_timezone
+        rememberUserTimezone(body.user_timezone)
+      }
       const firstName = typeof body?.first_name === 'string' ? body.first_name.trim() : ''
       const lastName = typeof body?.last_name === 'string' ? body.last_name.trim() : ''
       if (firstName) meta.user_first_name = firstName
