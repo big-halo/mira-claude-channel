@@ -48,6 +48,25 @@ curl -X POST http://127.0.0.1:3141/api/chat \
 
 The request opens an SSE response until Claude's `Stop` hook forwards the final assistant message (timeout 120s). The stream emits `{"text": "..."}`, `{"sources": []}`, then `[DONE]`, matching the format the iOS app expects.
 
+## Background completion events
+
+Background commands and agents are associated with the Mira chat that launched
+them. The foreground response still completes normally. When Claude later wakes
+for a `<task-notification>` and responds, that response is buffered for the iOS
+app's background-event connection.
+
+The iOS client can consume the outbox from `GET /api/background-events`. Events
+use SSE `id` fields and can be replayed by reconnecting with `Last-Event-ID`.
+The stream stays open and sends the same
+heartbeat comments as the foreground chat stream. The in-memory buffer keeps the
+latest 500 events while the plugin is running, which covers cellular and tunnel
+reconnections without adding another persistence layer.
+
+```sh
+curl -N http://127.0.0.1:3141/api/background-events \
+  -H 'Last-Event-ID: 0'
+```
+
 ## Structure
 
 ```
