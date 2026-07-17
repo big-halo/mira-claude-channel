@@ -17,6 +17,7 @@ const REQUEST_TIMEOUT_MS = 120_000
 // stay well under the iOS watchdog threshold (currently 6s).
 const SSE_HEARTBEAT_MS = Number(process.env.MIRA_SSE_HEARTBEAT_MS ?? 2_000)
 const TUNNEL_BACKEND_URL = "https://glass-prod.thebighalo.com"
+const BACKGROUND_EVENT_BUFFER_CAP = 500
 
 function log(msg: string, extra?: unknown) {
   const line =
@@ -147,6 +148,7 @@ type Pending = {
   // dropped connection can reattach via /api/chat/reconnect without sending
   // the user's message to Claude a second time.
   sessionId: string
+  appSessionId: string | null
   resolve: (response: ChatResponse) => void
   reject: (error: ChatClosedError) => void
   timer: ReturnType<typeof setTimeout>
@@ -181,6 +183,50 @@ const encoder = new TextEncoder()
 
 // Sessions stay reachable here so /api/chat/reconnect can find them by id
 const sessionsById = new Map<string, Pending>()
+
+type BackgroundEvent = {
+  id: number
+  session_id: string | null
+  text: string
+}
+
+const backgroundTasks = new Map<string, { claudeSessionId: string; appSessionId: string | null }>()
+const backgroundEvents: BackgroundEvent[] = []
+const backgroundEventControllers = new Set<ReadableStreamDefaultController<Uint8Array>>()
+let nextBackgroundEventId = 1
+
+function backgroundEventSse(event: BackgroundEvent): Uint8Array {
+  return encoder.encode(`id: ${event.id}\ndata: ${JSON.stringify(event)}\n\n`)
+}
+
+function enqueueBackgroundCompletion(claudeSessionId: string, text: string, toolUseIds: string[]): number[] {
+  const matched = toolUseIds
+    .map(id => ({ id, task: backgroundTasks.get(id) }))
+    .filter(({ task }) => task?.claudeSessionId === claudeSessionId)
+  const sessionIds = new Set(matched.map(({ task }) => task!.appSessionId))
+  const eventIds: number[] = []
+  for (const sessionId of sessionIds) {
+    const event: BackgroundEvent = {
+      id: nextBackgroundEventId++,
+      session_id: sessionId,
+      text,
+    }
+    backgroundEvents.push(event)
+    if (backgroundEvents.length > BACKGROUND_EVENT_BUFFER_CAP) backgroundEvents.shift()
+    const encoded = backgroundEventSse(event)
+    for (const controller of [...backgroundEventControllers]) {
+      try {
+        controller.enqueue(encoded)
+      } catch {
+        backgroundEventControllers.delete(controller)
+      }
+    }
+    eventIds.push(event.id)
+  }
+
+  for (const { id } of matched) backgroundTasks.delete(id)
+  return eventIds
+}
 
 const RECONNECT_RETENTION_MS = Number(process.env.MIRA_RECONNECT_RETENTION_MS ?? 600_000)
 
@@ -242,7 +288,7 @@ function broadcast(p: Pending, payload: unknown) {
   }
 }
 
-function openPendingChat(): { entry: Pending; response: Promise<ChatResponse> } {
+function openPendingChat(appSessionId: string | null): { entry: Pending; response: Promise<ChatResponse> } {
   let entry!: Pending
   const response = new Promise<ChatResponse>((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -253,6 +299,7 @@ function openPendingChat(): { entry: Pending; response: Promise<ChatResponse> } 
     }, REQUEST_TIMEOUT_MS)
     entry = {
       sessionId: newSessionId(),
+      appSessionId,
       resolve,
       reject,
       timer,
@@ -376,6 +423,48 @@ function reattachToSession(p: Pending, response: Promise<ChatResponse>, lastEven
     },
     cancel() {
       if (p.controller) p.controller = null
+    },
+  })
+}
+
+function backgroundEventStream(lastEventId: number) {
+  let heartbeat: ReturnType<typeof setInterval> | null = null
+  let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
+
+  const detach = () => {
+    if (heartbeat) {
+      clearInterval(heartbeat)
+      heartbeat = null
+    }
+    if (streamController) {
+      backgroundEventControllers.delete(streamController)
+      streamController = null
+    }
+  }
+
+  return new ReadableStream({
+    start(controller) {
+      streamController = controller
+      const missed = backgroundEvents.filter(event => event.id > lastEventId)
+
+      try {
+        for (const event of missed) controller.enqueue(backgroundEventSse(event))
+        backgroundEventControllers.add(controller)
+        heartbeat = setInterval(() => {
+          try {
+            controller.enqueue(encoder.encode(`: keepalive ${Date.now()}\n\n`))
+          } catch {
+            detach()
+          }
+        }, SSE_HEARTBEAT_MS)
+        log(`background events CONNECT after=${lastEventId} replayed=${missed.length}`)
+      } catch {
+        detach()
+      }
+    },
+    cancel() {
+      detach()
+      log('background events DISCONNECT')
     },
   })
 }
@@ -615,6 +704,17 @@ Bun.serve({
       return Response.json({ status: 'ok', active: active !== null })
     }
 
+    if (req.method === 'GET' && url.pathname === '/api/background-events') {
+      const lastEventId = Math.max(0, Number(req.headers.get('last-event-id')) || 0)
+      return new Response(backgroundEventStream(lastEventId), {
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache, no-transform',
+          'X-Accel-Buffering': 'no',
+        },
+      })
+    }
+
     if (req.method === 'POST' && url.pathname === '/connect') {
       let body: any
       try {
@@ -723,6 +823,14 @@ Bun.serve({
         return Response.json({ status: 'ignored', reason: 'no_active_chat' })
       }
 
+      if (body?.is_background && toolUseId && typeof body?.session_id === 'string') {
+        backgroundTasks.set(toolUseId, {
+          claudeSessionId: body.session_id,
+          appSessionId: p.appSessionId,
+        })
+        log(`background task tracked tool_use_id=${toolUseId}`)
+      }
+
       resetTimeout()
       const display = renderToolDisplay(toolName, body?.tool_input)
       const payload: Record<string, unknown> = {
@@ -750,6 +858,19 @@ Bun.serve({
       if (!text.trim()) {
         log('http /api/stop empty last_assistant_message')
         return Response.json({ status: 'ignored', reason: 'empty_message' })
+      }
+
+      const claudeSessionId = typeof body?.session_id === 'string' ? body.session_id : ''
+      const toolUseIds = Array.isArray(body?.background_tool_use_ids)
+        ? body.background_tool_use_ids.filter((id: unknown): id is string => typeof id === 'string')
+        : []
+      if (claudeSessionId && toolUseIds.length > 0) {
+        const eventIds = enqueueBackgroundCompletion(claudeSessionId, text, toolUseIds)
+        log(`background completion events=${eventIds.join(',') || 'none'}`)
+        return Response.json({
+          status: eventIds.length ? 'background_queued' : 'ignored',
+          event_ids: eventIds,
+        })
       }
 
       const p = active
@@ -835,7 +956,10 @@ Bun.serve({
         meta.prior_user_messages = priorUserMessages.join('\n')
       }
 
-      const { entry, response } = openPendingChat()
+      const appSessionId = typeof body?.session_id === 'string' && body.session_id.trim()
+        ? body.session_id.trim()
+        : null
+      const { entry, response } = openPendingChat(appSessionId)
       try {
         log(`chat IN session_id=${entry.sessionId} chars=${userText.length} prior_user_msgs=${priorUserMessages.length}`)
         await mcp.notification({
@@ -844,7 +968,10 @@ Bun.serve({
         })
 
         return new Response(responseToSse(entry, response), {
-          headers: { 'Content-Type': 'text/event-stream' },
+          headers: {
+            'Content-Type': 'text/event-stream',
+            'X-Mira-Session-ID': entry.sessionId,
+          },
         })
       } catch (err) {
         cancelPendingChat(entry)

@@ -8,6 +8,7 @@ type Input = {
   tool_name?: string
   tool_use_id?: string
   tool_input?: Record<string, unknown>
+  tool_response?: unknown
 }
 
 const raw = await new Response(Bun.stdin.stream()).text()
@@ -21,6 +22,9 @@ try {
 if (!input.tool_name) process.exit(0)
 
 const port = process.env.MIRA_PORT ?? '3141'
+const responseText = JSON.stringify(input.tool_response ?? '')
+const isBackground = input.tool_input?.run_in_background === true
+  || /backgroundTaskId|background_task_id|background(?: task)?(?: with)? ID/i.test(responseText)
 await fetch(`http://127.0.0.1:${port}/api/tool-status`, {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
@@ -29,5 +33,7 @@ await fetch(`http://127.0.0.1:${port}/api/tool-status`, {
     tool_name: input.tool_name,
     tool_use_id: input.tool_use_id,
     tool_input: input.tool_input,
+    session_id: input.session_id,
+    is_background: isBackground,
   }),
 }).catch(() => null)
