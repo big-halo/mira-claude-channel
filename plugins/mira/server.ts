@@ -3,11 +3,11 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
-import { mkdirSync, writeFileSync, existsSync } from 'fs'
+import { mkdirSync, writeFileSync } from 'fs'
 import { openProvisionedTunnel, getTunnelUrl, getTunnelError } from './cloudflare'
 import { getOrCreateDevice } from './device'
 import { join } from 'path'
-import { homedir } from 'os'
+import { syncConversationsToMarkdown } from './conversation-sync'
 
 const PORT = Number(3141)
 const REQUEST_TIMEOUT_MS = 120_000
@@ -63,62 +63,6 @@ function renderToolDisplay(toolName: string, input: unknown): string {
     }
   }
   return `${pretty}…`
-}
-
-function sessionMarkdownPath(userDir: string, session: BackendSession): string {
-  const title =
-    (session.title?.trim() || 'untitled')
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 80) || 'untitled'
-  const raw = session.start_time!
-  const datetime = `${raw.slice(0, 10)}-${raw.slice(11, 16).replace(':', '-')}`
-  return join(userDir, `${datetime}-${title}-${session.id}.md`)
-}
-
-async function syncConversationsToMarkdown() {
-  if (!connection) return
-  const listRes = await backendGet('/messages/list')
-  if (!listRes.ok) {
-    const body = await listRes.text().catch(() => '')
-    log(`conversation sync backend error status=${listRes.status} body=${body}`)
-    return
-  }
-  const data = (await listRes.json()) as { sessions: BackendSession[] }
-  const sessions = data.sessions ?? []
-  const userDir = join(homedir(), '.mira', connection.userId)
-  mkdirSync(userDir, { recursive: true })
-  for (const session of sessions) {
-    const path = sessionMarkdownPath(userDir, session)
-    if (existsSync(path)) {
-      continue
-    }
-    const detailRes = await backendGet(
-      `/messages/sessions/${encodeURIComponent(session.id)}?include_messages=true`,
-    )
-    if (!detailRes.ok) {
-      const body = await detailRes.text().catch(() => '')
-      log(`session sync failed id=${session.id} status=${detailRes.status} body=${body}`)
-      continue
-    }
-    const detail = (await detailRes.json()) as BackendSessionDetail
-    const messages = detail.messages ?? []
-    const markdown = [
-      `# ${detail.title?.trim() || '(untitled)'}`,
-      '',
-      `Session ID: ${detail.id}`,
-      `Time: ${detail.start_time ?? '(no start time)'} -> ${detail.end_time ?? '(no end time)'}`,
-      detail.summary?.trim() ? `Summary: ${detail.summary.trim()}` : null,
-      '',
-      '## Transcript',
-      '',
-      ...messages.map((m) => `[${m.timestamp}] speaker ${m.speaker}: ${m.text}`),
-      '',
-    ].filter(Boolean).join('\n')
-    writeFileSync(path, markdown, 'utf8')
-  }
-  log(`conversation sync OK user_id=${connection.userId} sessions=${sessions.length}`)
 }
 
 // Kill any previous server instance that may still own the port.
@@ -388,6 +332,7 @@ function cancelPendingChat(entry: Pending) {
 }
 
 type Connection = {
+  sync: AbortController
   userId: string
   accessToken: string
   backendBaseUrl: string
@@ -531,43 +476,6 @@ mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
   })
 })
 
-// MARK: - Backend transcript helpers
-
-type BackendSession = {
-  id: string
-  title?: string | null
-  summary?: string | null
-  summary_generated?: boolean
-  start_time?: string | null
-  end_time?: string | null
-  share_token?: string | null
-}
-
-type BackendMessage = {
-  id: string
-  text: string
-  speaker: number
-  timestamp: string
-  is_final: boolean
-}
-
-type BackendSessionDetail = BackendSession & {
-  messages?: BackendMessage[]
-  message_count?: number
-}
-
-async function backendGet(path: string): Promise<Response> {
-  if (!connection) throw new Error('not connected')
-  const url = `${connection.backendBaseUrl}${path}`
-  return fetch(url, {
-    method: 'GET',
-    headers: {
-      Authorization: `Bearer ${connection.accessToken}`,
-      Accept: 'application/json',
-    },
-  })
-}
-
 await mcp.connect(new StdioServerTransport())
 log('mcp stdio connected')
 
@@ -575,6 +483,7 @@ log('mcp stdio connected')
 // and the next launch can bind. Without this, Bun.serve() keeps the loop
 // alive forever after stdio closes.
 const shutdown = (reason: string) => {
+  connection?.sync.abort()
   log(`shutdown reason=${reason}`)
   try { Bun.file(PID_FILE).text().then(t => { if (parseInt(t.trim()) === process.pid) writeFileSync(PID_FILE, '') }) } catch { /* best-effort */ }
   setTimeout(() => process.exit(0), 200)
@@ -644,15 +553,18 @@ Bun.serve({
         log(`http /connect bad backend_base_url=${rawBackend} err=${(err as Error).message}`)
         return Response.json({ error: 'backend_base_url is not a valid URL' }, { status: 400 })
       }
+      connection?.sync.abort()
+      const sync = new AbortController()
       connection = {
+        sync,
         userId,
         accessToken,
         backendBaseUrl,
         connectedAt: Date.now(),
       }
 
-      void syncConversationsToMarkdown().catch((err) => {
-        log(`conversation sync failed: ${(err as Error).stack ?? (err as Error).message}`)
+      void syncConversationsToMarkdown(connection, sync.signal, log).catch((err) => {
+        if (!sync.signal.aborted) log(`conversation sync failed: ${(err as Error).stack ?? (err as Error).message}`)
       })
 
       log(`connect OK user_id=${userId} backend=${backendBaseUrl} token_len=${accessToken.length}`)
@@ -677,6 +589,7 @@ Bun.serve({
     if (req.method === 'POST' && url.pathname === '/disconnect') {
       const wasConnected = connection !== null
       const userId = connection?.userId
+      connection?.sync.abort()
       connection = null
       log(`disconnect was_connected=${wasConnected} user_id=${userId ?? '(none)'}`)
       return Response.json({ status: 'disconnected' })
