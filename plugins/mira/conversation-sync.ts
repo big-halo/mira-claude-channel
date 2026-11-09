@@ -1,4 +1,6 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import {
+  existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync,
+} from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -36,6 +38,48 @@ function datedMarkdownPath(userDir: string, session: BackendSession, start: stri
   return join(userDir, `${datetime}-${title}-${session.id}.md`)
 }
 
+function renderNote(detail: BackendSessionDetail): string {
+  const messages = detail.messages ?? []
+  return [
+    `# ${detail.title?.trim() || '(untitled)'}`,
+    '',
+    `Session ID: ${detail.id}`,
+    `Time: ${detail.start_time ?? '(no start time)'} -> ${detail.end_time ?? '(no end time)'}`,
+    detail.summary?.trim() ? `Summary: ${detail.summary.trim()}` : null,
+    '',
+    '## Transcript',
+    '',
+    ...messages.map((m) => `[${m.timestamp}] speaker ${m.speaker}: ${m.text}`),
+    '',
+  ].filter(Boolean).join('\n')
+}
+
+function matchesPlaceholder(path: string, expected: string): boolean {
+  const stat = lstatSync(path, { throwIfNoEntry: false })
+  if (!stat?.isFile() || stat.size !== Buffer.byteLength(expected)) return false
+  return readFileSync(path, 'utf8') === expected
+}
+
+function saveNote(directory: string, path: string, markdown: string, placeholder?: string) {
+  const temporary = mkdtempSync(join(directory, '.mira-sync-'))
+  try {
+    const staged = join(temporary, 'note')
+    writeFileSync(staged, markdown)
+    if (placeholder !== undefined) {
+      // The user may have edited the note while we fetched its transcript.
+      if (matchesPlaceholder(path, placeholder)) renameSync(staged, path)
+    } else {
+      try {
+        linkSync(staged, path)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      }
+    }
+  } finally {
+    rmSync(temporary, { recursive: true, force: true })
+  }
+}
+
 export async function syncConversationsToMarkdown(
   connection: { backendBaseUrl: string; accessToken: string; userId: string },
   signal: AbortSignal,
@@ -60,10 +104,11 @@ export async function syncConversationsToMarkdown(
   mkdirSync(userDir, { recursive: true })
   for (const session of sessions) {
     const undated = join(userDir, `undated-${encodeURIComponent(session.id)}.md`)
-    const path = session.start_time ? datedMarkdownPath(userDir, session, session.start_time) : undated
-    if (existsSync(path) || (path !== undated && existsSync(undated))) {
-      continue
-    }
+    const dated = session.start_time ? datedMarkdownPath(userDir, session, session.start_time) : undefined
+    if (dated && existsSync(dated)) continue
+    const hasUndated = existsSync(undated)
+    const placeholder = renderNote({ id: session.id, title: session.title })
+    if (hasUndated && !matchesPlaceholder(undated, placeholder)) continue
     const detailRes = await backendGet(
       `/messages/sessions/${encodeURIComponent(session.id)}?include_messages=true`,
     )
@@ -74,20 +119,10 @@ export async function syncConversationsToMarkdown(
     }
     const detail = (await detailRes.json()) as BackendSessionDetail
     if (signal.aborted) return
-    const messages = detail.messages ?? []
-    const markdown = [
-      `# ${detail.title?.trim() || '(untitled)'}`,
-      '',
-      `Session ID: ${detail.id}`,
-      `Time: ${detail.start_time ?? '(no start time)'} -> ${detail.end_time ?? '(no end time)'}`,
-      detail.summary?.trim() ? `Summary: ${detail.summary.trim()}` : null,
-      '',
-      '## Transcript',
-      '',
-      ...messages.map((m) => `[${m.timestamp}] speaker ${m.speaker}: ${m.text}`),
-      '',
-    ].filter(Boolean).join('\n')
-    writeFileSync(path, markdown, 'utf8')
+    const hasContent = detail.summary?.trim() || detail.messages?.some((message) => message.text.trim())
+    if (detail.id !== session.id || !hasContent) continue
+    const path = hasUndated ? undated : dated ?? undated
+    saveNote(userDir, path, renderNote(detail), hasUndated ? placeholder : undefined)
   }
   log(`conversation sync OK user_id=${connection.userId} sessions=${sessions.length}`)
 }

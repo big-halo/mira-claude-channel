@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { syncConversationsToMarkdown } from './conversation-sync'
@@ -73,7 +73,7 @@ test('an undated recording syncs alongside dated recordings and keeps its file w
   const { signal } = new AbortController()
   const undated = { id: 's0', title: 'First recording', start_time: null }
   fetchSpy.mockResolvedValueOnce(Response.json({ sessions: [undated, session] }))
-    .mockResolvedValueOnce(Response.json(undated))
+    .mockResolvedValueOnce(Response.json({ ...undated, messages: detail.messages }))
     .mockResolvedValueOnce(Response.json(detail))
     .mockResolvedValueOnce(Response.json({ sessions: [{ ...undated, start_time: session.start_time }, session] }))
   await syncConversationsToMarkdown(account, signal, log, root)
@@ -82,4 +82,87 @@ test('an undated recording syncs alongside dated recordings and keeps its file w
   expect(readdirSync(directory).sort()).toEqual(['2026-01-02-12-30-example-s1.md', 'undated-s0.md'])
   expect(readFileSync(join(directory, 'undated-s0.md'), 'utf8')).toContain('(no start time)')
   expect(fetchSpy).toHaveBeenCalledTimes(4)
+})
+
+test('an empty undated row waits for its completed transcript', async () => {
+  const { signal } = new AbortController()
+  const early = { id: session.id, title: session.title, start_time: null }
+  const completed = { ...detail, end_time: '2026-01-02T12:45:00Z' }
+  fetchSpy.mockResolvedValueOnce(Response.json({ sessions: [early] }))
+    .mockResolvedValueOnce(Response.json(early))
+    .mockResolvedValueOnce(Response.json({ sessions: [completed] }))
+    .mockResolvedValueOnce(Response.json(completed))
+  await syncConversationsToMarkdown(account, signal, log, root)
+  const directory = join(root, account.userId)
+  expect(readdirSync(directory)).toEqual([])
+  await syncConversationsToMarkdown(account, signal, log, root)
+  const files = readdirSync(directory)
+  expect(files).toHaveLength(1)
+  const note = readFileSync(join(directory, files[0]), 'utf8')
+  expect(note).toContain('Hello')
+  expect(note).toContain(completed.end_time)
+})
+
+test.each([false, true])('recovers an old placeholder and respects a local edit during the request (edited=%s)', async (edited) => {
+  const directory = join(root, account.userId)
+  mkdirSync(directory)
+  const path = join(directory, 'undated-s1.md')
+  const empty = '# Example\nSession ID: s1\nTime: (no start time) -> (no end time)\n## Transcript'
+  writeFileSync(path, empty)
+  const completed = { ...detail, end_time: '2026-01-02T12:45:00Z' }
+  fetchSpy.mockResolvedValueOnce(Response.json({ sessions: [completed] }))
+    .mockImplementationOnce(async () => {
+      if (edited) writeFileSync(path, 'My local note')
+      return Response.json(completed)
+    })
+  await syncConversationsToMarkdown(account, new AbortController().signal, log, root)
+  expect(readdirSync(directory)).toEqual(['undated-s1.md'])
+  const note = readFileSync(path, 'utf8')
+  if (edited) expect(note).toBe('My local note')
+  else {
+    expect(note).toContain('Hello')
+    expect(note).toContain(completed.end_time)
+  }
+})
+
+test('a note edited before sync is preserved without a detail request', async () => {
+  const directory = join(root, account.userId)
+  mkdirSync(directory)
+  const path = join(directory, 'undated-s1.md')
+  writeFileSync(path, 'My local note')
+  fetchSpy.mockResolvedValueOnce(Response.json({ sessions: [session] }))
+  await syncConversationsToMarkdown(account, new AbortController().signal, log, root)
+  expect(fetchSpy).toHaveBeenCalledTimes(1)
+  expect(readFileSync(path, 'utf8')).toBe('My local note')
+})
+
+test('a note created during a detail request wins', async () => {
+  const path = join(root, account.userId, '2026-01-02-12-30-example-s1.md')
+  fetchSpy.mockResolvedValueOnce(Response.json({ sessions: [session] }))
+    .mockImplementationOnce(async () => {
+      writeFileSync(path, 'My local note')
+      return Response.json(detail)
+    })
+  await syncConversationsToMarkdown(account, new AbortController().signal, log, root)
+  expect(readFileSync(path, 'utf8')).toBe('My local note')
+})
+
+test('a mismatched detail cannot be saved in another session’s note', async () => {
+  fetchSpy.mockResolvedValueOnce(Response.json({ sessions: [session] }))
+    .mockResolvedValueOnce(Response.json({ ...detail, id: 's2' }))
+  await syncConversationsToMarkdown(account, new AbortController().signal, log, root)
+  expect(readdirSync(join(root, account.userId))).toEqual([])
+})
+
+test('an old empty note can recover when speech arrives before timestamps', async () => {
+  const early = { id: session.id, title: session.title }
+  const directory = join(root, account.userId)
+  mkdirSync(directory)
+  const path = join(directory, 'undated-s1.md')
+  writeFileSync(path, '# Example\nSession ID: s1\nTime: (no start time) -> (no end time)\n## Transcript')
+  fetchSpy.mockResolvedValueOnce(Response.json({ sessions: [early] }))
+    .mockResolvedValueOnce(Response.json({ ...early, messages: detail.messages }))
+  await syncConversationsToMarkdown(account, new AbortController().signal, log, root)
+  expect(readdirSync(directory)).toEqual(['undated-s1.md'])
+  expect(readFileSync(path, 'utf8')).toContain('Hello')
 })
